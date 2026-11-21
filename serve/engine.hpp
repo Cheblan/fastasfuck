@@ -18,6 +18,7 @@
 #include "serve/capture.hpp"
 #include "serve/output_parser.hpp"
 #include "serve/prompt_cache.hpp"
+#include "serve/mtp_calib.hpp"
 #include "serve/grammar.hpp"
 #include "serve/sampler.hpp"
 #include "serve/structured_output.hpp"
@@ -582,6 +583,10 @@ public:
         int64_t mtp_draft = 1;    // most drafts per verify (the head chained), 1..15
         bool mtp_escalating_margin = true; // escalate MTP margin with draft depth (slope 0.08 per step)
         float mtp_margin_slope = 0.08f;    // margin increase per draft step in escalating mode
+        float mtp_alpha = 0.85f;
+        float mtp_beta = -0.04f;
+        float mtp_bias = 0.0f;
+        MtpHardwareProfile mtp_hw_profile;
         // Non-empty: every finished request's token ids and MTP steps are written there (serve/capture.hpp). The
         // directory must exist.
         std::string capture_dir;
@@ -657,6 +662,14 @@ public:
     void set_sampled_gate(const std::string &r) { options_.set_sampled_gate(r); }
     void set_mtp_lut_step_penalty(float p) { options_.mtp_lut_step_penalty = p; }
     void set_mtp_ema_decay(float d) { options_.mtp_ema_decay = d; }
+    float mtp_alpha() const { return options_.mtp_alpha; }
+    float mtp_beta() const { return options_.mtp_beta; }
+    float mtp_bias() const { return options_.mtp_bias; }
+    const MtpHardwareProfile &mtp_hw_profile() const { return options_.mtp_hw_profile; }
+    void set_mtp_alpha(float a) { options_.mtp_alpha = a; }
+    void set_mtp_beta(float b) { options_.mtp_beta = b; }
+    void set_mtp_bias(float b) { options_.mtp_bias = b; }
+    void set_mtp_hw_profile(const MtpHardwareProfile &p) { options_.mtp_hw_profile = p; }
 
     struct HwLatencyReport {
         double verify_ms[16]{};

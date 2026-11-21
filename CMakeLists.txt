@@ -223,7 +223,8 @@ add_library(strix_serve STATIC
     serve/host_buffer.cpp
     serve/vision_preprocess.cpp
     serve/vision_request.cpp
-    serve/vocab_filter.cpp)
+    serve/vocab_filter.cpp
+    serve/mtp_calib.cpp)
 target_include_directories(strix_serve PUBLIC "${CMAKE_SOURCE_DIR}")
 target_include_directories(strix_serve SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/third_party/cpp-httplib"
                                              "${CMAKE_SOURCE_DIR}/third_party/stb")

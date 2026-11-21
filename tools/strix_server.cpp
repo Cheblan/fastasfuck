@@ -20,6 +20,7 @@
 #include "serve/server_config.hpp"
 #include "serve/tokenizer.hpp"
 #include "serve/vocab_filter.hpp"
+#include "serve/mtp_calib.hpp"
 #include "serve/vision_request.hpp"
 #include "kernels/vision.hpp"  // kernels::kMaxVisionSeq (the attention cap = the resize clamp)
 
@@ -368,8 +369,83 @@ int run(int argc, char **argv) {
                         "keep its RAM margin after it (MemAvailable ", c->mem_available_now() >> 20, " MiB) - every ",
                         "slot together holds more K/V than this machine has room for");
         });
+    MtpHardwareProfile hw_prof;
+    hw_prof.draft_step_ms = (float)settings.number("mtp-draft-ms");
+    hw_prof.verify_base_ms = (float)settings.number("mtp-verify-base-ms");
+    hw_prof.verify_step_ms = (float)settings.number("mtp-verify-step-ms");
+    const std::string v_lat_cfg = settings.text("mtp-verify-latencies");
+    if (v_lat_cfg != "auto" && !v_lat_cfg.empty()) {
+        std::vector<float> grid = {0.0f};
+        std::stringstream ss(v_lat_cfg);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try {
+                grid.push_back(std::stof(token));
+            } catch (...) {}
+        }
+        if (grid.size() >= 2) hw_prof.verify_latencies = grid;
+    }
+    float eff_alpha = (float)settings.number("mtp-alpha");
+    float eff_beta = (float)settings.number("mtp-beta");
+    float eff_bias = (float)settings.number("mtp-bias");
+
+    if (use_mtp && settings.on("mtp-calib")) {
+        uint64_t strix_h = 0, fsize = 0;
+        int64_t fmtime = 0;
+        const std::string fp = compute_weights_fingerprint(
+            weights, cfg.model_id, draft_head_q4,
+            settings.text("mtp-vocab-filter"), settings.text("gdn-precision"),
+            &strix_h, &fsize, &fmtime
+        );
+        std::string cache_path = settings.text("mtp-calib-cache-file");
+        if (cache_path.empty() || cache_path == "off") {
+            std::string dir = weights;
+            size_t slash = dir.rfind('/');
+            if (slash != std::string::npos) dir = dir.substr(0, slash);
+            cache_path = dir + "/mtp_calib_cache.json";
+        }
+        std::optional<MtpCalibratedProfile> cached_prof;
+        if (settings.on("mtp-calib-cache")) {
+            cached_prof = load_cached_profile(cache_path, fp);
+        }
+        if (cached_prof) {
+            slog(LogLevel::Info, "startup: [MTP_CALIB] loaded cached profile %s (draft=%.2f ms, verify[1]=%.2f ms, alpha=%.2f, beta=%.3f, bias=%.2f)",
+                 fp.substr(0, 12).c_str(), cached_prof->hw.draft_step_ms, cached_prof->hw.verify_base_ms,
+                 cached_prof->acceptance.alpha, cached_prof->acceptance.beta, cached_prof->acceptance.bias);
+            hw_prof = cached_prof->hw;
+            eff_alpha = cached_prof->acceptance.alpha;
+            eff_beta = cached_prof->acceptance.beta;
+            eff_bias = cached_prof->acceptance.bias;
+        } else {
+            slog(LogLevel::Info, "startup: [MTP_CALIB] profile %s not in cache; recording baseline to %s",
+                 fp.substr(0, 12).c_str(), cache_path.c_str());
+            if (settings.on("mtp-calib-cache")) {
+                MtpCalibratedProfile p_save;
+                p_save.fingerprint = fp;
+                p_save.model_id = cfg.model_id;
+                p_save.weights_path = weights;
+                p_save.weights_strix_hash = strix_h;
+                p_save.weights_size = fsize;
+                p_save.weights_mtime = fmtime;
+                p_save.draft_head_q4 = draft_head_q4;
+                p_save.mtp_vocab_filter = settings.text("mtp-vocab-filter");
+                p_save.gdn_precision = settings.text("gdn-precision");
+                p_save.hw = hw_prof;
+                p_save.acceptance.alpha = eff_alpha;
+                p_save.acceptance.beta = eff_beta;
+                p_save.acceptance.bias = eff_bias;
+                p_save.acceptance.sample_count = (int)settings.integer("mtp-calib-triplets");
+                save_cached_profile(cache_path, p_save);
+            }
+        }
+    }
+
     Engine::Options eng_opts;
     eng_opts.cache = cache.get();
+    eng_opts.mtp_hw_profile = hw_prof;
+    eng_opts.mtp_alpha = eff_alpha;
+    eng_opts.mtp_beta = eff_beta;
+    eng_opts.mtp_bias = eff_bias;
     eng_opts.mtp_margin = mtp_margin;
     eng_opts.mtp_draft = mtp_draft;
     eng_opts.mtp_escalating_margin = settings.on("mtp-escalating-margin");
