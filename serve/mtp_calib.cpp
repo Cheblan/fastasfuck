@@ -3,6 +3,7 @@
 #include "serve/log.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -25,7 +26,7 @@ float compute_trimmed_mean(std::vector<float> values, float trim_pct) {
     std::sort(values.begin(), values.end());
     size_t trim_k = static_cast<size_t>(values.size() * trim_pct);
     if (2 * trim_k >= values.size()) return compute_median(values);
-    
+
     double sum = 0.0;
     size_t count = 0;
     for (size_t i = trim_k; i < values.size() - trim_k; ++i) {
@@ -121,15 +122,12 @@ MtpAcceptanceProfile fit_acceptance_model(
     res.sample_count = static_cast<int>(samples.size());
     if (samples.empty()) return res;
 
-    // w = [alpha, beta, bias]
     double w[3] = {0.85, -0.04, 0.0};
 
-    // IRLS / Newton-Raphson loop (up to 20 steps)
     for (int iter = 0; iter < 20; ++iter) {
         double grad[3] = {0.0, 0.0, 0.0};
         double H[3][3] = {{0.0}};
 
-        // Add L2 penalty on alpha and beta (not bias)
         grad[0] += 2.0 * l2_reg * w[0];
         grad[1] += 2.0 * l2_reg * w[1];
         H[0][0] += 2.0 * l2_reg;
@@ -151,7 +149,6 @@ MtpAcceptanceProfile fit_acceptance_model(
             }
         }
 
-        // Solve 3x3 system: H * delta = grad via Cramer's rule
         double det = H[0][0] * (H[1][1] * H[2][2] - H[1][2] * H[2][1])
                    - H[0][1] * (H[1][0] * H[2][2] - H[1][2] * H[2][0])
                    + H[0][2] * (H[1][0] * H[2][1] - H[1][1] * H[2][0]);
@@ -202,31 +199,49 @@ std::optional<MtpCalibratedProfile> load_cached_profile(
         json::Value root = json::Value::parse(content);
         if (!root.is_object()) return std::nullopt;
 
-        std::string p_path = "profiles." + fingerprint;
-        json::Value prof = root.get("profiles").get(fingerprint);
-        if (prof.is_null()) return std::nullopt;
+        const json::Value *profiles = root.find("profiles");
+        if (!profiles || !profiles->is_object()) return std::nullopt;
+
+        const json::Value *prof = profiles->find(fingerprint);
+        if (!prof || !prof->is_object()) return std::nullopt;
 
         MtpCalibratedProfile res;
         res.fingerprint = fingerprint;
 
-        json::Value hw = prof.get("hardware_latencies");
-        res.hw.draft_step_ms = static_cast<float>(hw.get("draft_step_ms").as_double(p_path + ".draft_step_ms"));
-        res.hw.verify_base_ms = static_cast<float>(hw.get("verify_base_ms").as_double(p_path + ".verify_base_ms"));
-        res.hw.verify_step_ms = static_cast<float>(hw.get("verify_step_ms").as_double(p_path + ".verify_step_ms"));
+        const json::Value *hw = prof->find("hardware_latencies");
+        if (!hw || !hw->is_object()) return std::nullopt;
 
-        json::Value grid = hw.get("verify_ms_grid");
-        if (grid.is_array()) {
+        const json::Value *v_draft = hw->find("draft_step_ms");
+        if (v_draft) res.hw.draft_step_ms = static_cast<float>(v_draft->as_double("draft_step_ms"));
+
+        const json::Value *v_base = hw->find("verify_base_ms");
+        if (v_base) res.hw.verify_base_ms = static_cast<float>(v_base->as_double("verify_base_ms"));
+
+        const json::Value *v_step = hw->find("verify_step_ms");
+        if (v_step) res.hw.verify_step_ms = static_cast<float>(v_step->as_double("verify_step_ms"));
+
+        const json::Value *grid = hw->find("verify_ms_grid");
+        if (grid && grid->is_array()) {
             res.hw.verify_latencies.clear();
-            for (size_t i = 0; i < grid.array_size(); ++i) {
-                res.hw.verify_latencies.push_back(static_cast<float>(grid.at(i).as_double("grid[" + std::to_string(i) + "]")));
+            for (const auto &item : grid->as_array("verify_ms_grid")) {
+                res.hw.verify_latencies.push_back(static_cast<float>(item.as_double("grid_item")));
             }
         }
 
-        json::Value acc = prof.get("acceptance_model");
-        res.acceptance.alpha = static_cast<float>(acc.get("alpha").as_double(p_path + ".alpha"));
-        res.acceptance.beta = static_cast<float>(acc.get("beta").as_double(p_path + ".beta"));
-        res.acceptance.bias = static_cast<float>(acc.get("bias").as_double(p_path + ".bias"));
-        res.acceptance.sample_count = static_cast<int>(acc.get("triplets_count").as_int(p_path + ".triplets_count"));
+        const json::Value *acc = prof->find("acceptance_model");
+        if (acc && acc->is_object()) {
+            const json::Value *v_alpha = acc->find("alpha");
+            if (v_alpha) res.acceptance.alpha = static_cast<float>(v_alpha->as_double("alpha"));
+
+            const json::Value *v_beta = acc->find("beta");
+            if (v_beta) res.acceptance.beta = static_cast<float>(v_beta->as_double("beta"));
+
+            const json::Value *v_bias = acc->find("bias");
+            if (v_bias) res.acceptance.bias = static_cast<float>(v_bias->as_double("bias"));
+
+            const json::Value *v_cnt = acc->find("triplets_count");
+            if (v_cnt) res.acceptance.sample_count = static_cast<int>(v_cnt->as_int("triplets_count"));
+        }
 
         return res;
     } catch (...) {
@@ -251,8 +266,8 @@ bool save_cached_profile(
     }
 
     if (!root.is_object()) root = json::Value::object();
-    json::Value profiles = root.get("profiles");
-    if (!profiles.is_object()) profiles = json::Value::object();
+    const json::Value *existing_profiles = root.find("profiles");
+    json::Value profiles = (existing_profiles && existing_profiles->is_object()) ? *existing_profiles : json::Value::object();
 
     json::Value p = json::Value::object();
     json::Value meta = json::Value::object();
@@ -272,7 +287,7 @@ bool save_cached_profile(
     hw.set("verify_step_ms", json::Value::number(profile.hw.verify_step_ms));
     json::Value grid = json::Value::array();
     for (float v : profile.hw.verify_latencies) {
-        grid.push_back(json::Value::number(v));
+        grid.push(json::Value::number(v));
     }
     hw.set("verify_ms_grid", grid);
     p.set("hardware_latencies", hw);
