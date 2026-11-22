@@ -39,9 +39,21 @@ struct MtpHardwareProfile {
         58.05f, 60.49f, 63.20f, 65.92f, 68.72f, 71.53f, 72.39f, 73.25f, 75.87f,
         78.85f, 81.84f, 85.46f, 89.09f, 92.70f, 96.30f, 100.0f
     };
+    std::vector<float> solo_verify_latencies = {
+        0.0f, 25.10f, 30.30f, 34.96f, 39.63f, 42.66f, 45.69f, 50.65f, 55.61f
+    };
 
-    float get_verify_cost(int64_t T) const {
+    float get_verify_cost(int64_t T, bool is_solo = false) const {
         if (T <= 0) return 0.0f;
+        if (is_solo && !solo_verify_latencies.empty()) {
+            if ((size_t)T < solo_verify_latencies.size()) {
+                return solo_verify_latencies[(size_t)T];
+            }
+            float solo_step = (solo_verify_latencies.size() >= 2)
+                ? (solo_verify_latencies.back() - solo_verify_latencies[1]) / (float)(solo_verify_latencies.size() - 2)
+                : 4.3f;
+            return solo_verify_latencies.back() + (float)(T - (int64_t)(solo_verify_latencies.size() - 1)) * solo_step;
+        }
         if (verify_latencies.empty()) return (float)T * 4.0f;
         if ((size_t)T < verify_latencies.size()) {
             return verify_latencies[(size_t)T];

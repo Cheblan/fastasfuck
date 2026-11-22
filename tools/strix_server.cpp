@@ -410,8 +410,10 @@ int run(int argc, char **argv) {
             cached_prof = load_cached_profile(cache_path, fp);
         }
         if (cached_prof) {
-            slog(LogLevel::Info, "startup: [MTP_CALIB] loaded cached profile %s (draft=%.2f ms, verify[1]=%.2f ms, alpha=%.2f, beta=%.3f, bias=%.2f)",
-                 fp.substr(0, 12).c_str(), cached_prof->hw.draft_step_ms, cached_prof->hw.verify_base_ms,
+            slog(LogLevel::Info, "startup: [MTP_CALIB] loaded cached profile %s (draft=%.2f ms, solo_v[1]=%.2f ms, solo_v[4]=%.2f ms, batch_v[4]=%.2f ms, batch_v[16]=%.2f ms, alpha=%.2f, beta=%.3f, bias=%.2f)",
+                 fp.substr(0, 12).c_str(), cached_prof->hw.draft_step_ms,
+                 cached_prof->hw.solo_verify_latencies[1], cached_prof->hw.solo_verify_latencies[4],
+                 cached_prof->hw.verify_latencies[4], cached_prof->hw.verify_latencies[16],
                  cached_prof->acceptance.alpha, cached_prof->acceptance.beta, cached_prof->acceptance.bias);
             hw_prof = cached_prof->hw;
             eff_alpha = cached_prof->acceptance.alpha;
@@ -484,6 +486,32 @@ int run(int argc, char **argv) {
                     backend.forward_rows(0, ptok, 1, false, 0);
                 }
 
+                // 3a. Calibrate solo verify latencies for k in [1..8] (single slot 0, 1 sequence with k tokens)
+                const std::vector<int> kSoloNodes = {1, 2, 3, 4, 5, 6, 7, 8};
+                std::vector<float> solo_grid(9, 0.0f);
+                for (int k : kSoloNodes) {
+                    std::vector<int32_t> test_ids(calib_all.begin(), calib_all.begin() + k);
+                    std::vector<LmBackend::VerifyRun> runs = {{0, test_ids, nullptr}};
+                    backend.verify_batch(runs, false, 0);
+                    backend.drop_verify(0);
+
+                    std::vector<float> k_times;
+                    for (int t = 0; t < 5; ++t) {
+                        const auto t0 = std::chrono::steady_clock::now();
+                        backend.verify_batch(runs, false, 0);
+                        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                        backend.drop_verify(0);
+                        k_times.push_back((float)ms);
+                    }
+                    solo_grid[k] = compute_median(k_times);
+                }
+                for (size_t k = 2; k < solo_grid.size(); ++k) {
+                    if (solo_grid[k] <= solo_grid[k - 1]) solo_grid[k] = solo_grid[k - 1] + 0.5f;
+                }
+                hw_prof.solo_verify_latencies = solo_grid;
+                hw_prof.verify_base_ms = solo_grid[1];
+
+                // 3b. Calibrate batched verify latencies for M in [1..24] across active slots
                 const std::vector<int> kNodes = {1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24};
                 std::map<int, float> node_latencies;
                 for (int k : kNodes) {
@@ -546,12 +574,13 @@ int run(int argc, char **argv) {
 
                 if (verify_grid.size() >= 25 && verify_grid[1] > 1.0f) {
                     hw_prof.verify_latencies = verify_grid;
-                    hw_prof.verify_base_ms = verify_grid[1];
-                    hw_prof.verify_step_ms = std::max(0.1f, (verify_grid[24] - verify_grid[1]) / 23.0f);
+                    hw_prof.verify_step_ms = std::max(0.1f, (verify_grid[24] - verify_grid[4]) / 20.0f);
                 }
 
-                slog(LogLevel::Info, "startup: [MTP_CALIB] live calibration done: draft(1)=%.2f ms, draft(%d)=%.2f ms, verify[1]=%.2f ms, verify[16]=%.2f ms, verify[24]=%.2f ms",
-                     hw_prof.draft_step_ms, (int)total_slots, hw_prof.draft_batch_step_ms, hw_prof.verify_base_ms, hw_prof.verify_latencies[16], hw_prof.verify_latencies[24]);
+                slog(LogLevel::Info, "startup: [MTP_CALIB] live calibration done: draft(1)=%.2f ms, draft(%d)=%.2f ms, solo_v[1]=%.2f ms, solo_v[4]=%.2f ms, batch_v[4]=%.2f ms, batch_v[16]=%.2f ms, batch_v[24]=%.2f ms",
+                     hw_prof.draft_step_ms, (int)total_slots, hw_prof.draft_batch_step_ms,
+                     hw_prof.solo_verify_latencies[1], hw_prof.solo_verify_latencies[4],
+                     hw_prof.verify_latencies[4], hw_prof.verify_latencies[16], hw_prof.verify_latencies[24]);
             } catch (const std::exception &ex) {
                 slog(LogLevel::Warning, "startup: [MTP_CALIB] live calibration failed (%s); using baseline", ex.what());
                 backend.reset();

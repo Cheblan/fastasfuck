@@ -50,9 +50,9 @@ static constexpr float kVerifyLatencyMs[] = {
 };
 static constexpr float kDefaultMtpDraftStepMs = 1.64f;
 
-inline float get_verify_cost(int64_t T, const MtpHardwareProfile *prof = nullptr) {
-    if (prof && prof->verify_latencies.size() > 1) {
-        return prof->get_verify_cost(T);
+inline float get_verify_cost(int64_t T, const MtpHardwareProfile *prof = nullptr, bool is_solo = false) {
+    if (prof && (prof->verify_latencies.size() > 1 || prof->solo_verify_latencies.size() > 1)) {
+        return prof->get_verify_cost(T, is_solo);
     }
     if (T < 0) return 0.0f;
     constexpr size_t N = sizeof(kVerifyLatencyMs) / sizeof(kVerifyLatencyMs[0]);
@@ -1477,6 +1477,7 @@ void Engine::run(Job &job, Slot &sl) {
                 const int n_dec = arbiter_ ? arbiter_->decoding_count() : 1;
                 const float tau_global = (n_dec > 1 && arbiter_) ? arbiter_->cluster_tau()
                                                                  : (ema_T / std::max(1.0f, ema_E));
+                const bool is_solo = (n_dec <= 1);
                 const float sv = (n_dec > 1 && arbiter_) ? arbiter_->scale_verify() : 1.0f;
                 const float sd = (n_dec > 1 && arbiter_) ? arbiter_->scale_draft() : 1.0f;
                 const float draft_step_ms = (mtp_cfg.hw_profile.draft_step_ms > 0.0f) ? mtp_cfg.hw_profile.draft_step_ms : (sl.be ? sl.be->mtp_draft_step_ms() : kDefaultMtpDraftStepMs);
@@ -1488,8 +1489,8 @@ void Engine::run(Job &job, Slot &sl) {
                     const int m = (n_dec > 1 && arbiter_) ? arbiter_->active_drafting_count() : 1;
                     const int64_t pending_rows = (n_dec > 1 && arbiter_) ? arbiter_->pending_verify_rows() : 0;
                     const int64_t M_curr = pending_rows + (int64_t)m * (k_curr + 1);
-                    const float v_curr = get_verify_cost(M_curr, &mtp_cfg.hw_profile);
-                    const float v_next = get_verify_cost(M_curr + m, &mtp_cfg.hw_profile);
+                    const float v_curr = get_verify_cost(M_curr, &mtp_cfg.hw_profile, is_solo);
+                    const float v_next = get_verify_cost(M_curr + m, &mtp_cfg.hw_profile, is_solo);
                     const float delta_verify = ((v_next - v_curr) / (float)m) * sv;
                     const float c_draft = mtp_cfg.hw_profile.get_draft_cost(m, (int)slots_.size()) * sd;
                     const float delta_T = (c_draft / (float)m) + delta_verify;
@@ -1594,7 +1595,7 @@ void Engine::run(Job &job, Slot &sl) {
 
                     // Renewal-Reward EMA update after MTP verify round:
                     const int64_t acc = j;
-                    const float round_T = get_verify_cost(k + 1, &mtp_cfg.hw_profile) + (float)k * draft_step_ms;
+                    const float round_T = get_verify_cost(k + 1, &mtp_cfg.hw_profile, true) + (float)k * draft_step_ms;
                     const float round_E = 1.0f + (float)acc;
                     const float decay = mtp_cfg.ema_decay;
                     ema_T = (1.0f - decay) * ema_T + decay * round_T;
@@ -1681,7 +1682,7 @@ void Engine::run(Job &job, Slot &sl) {
             sl.seq.push_back(id);
             step(0, 0, 1);
             const float decay = mtp_cfg.ema_decay;
-            ema_T = (1.0f - decay) * ema_T + decay * get_verify_cost(1, &mtp_cfg.hw_profile);
+            ema_T = (1.0f - decay) * ema_T + decay * get_verify_cost(1, &mtp_cfg.hw_profile, true);
             ema_E = (1.0f - decay) * ema_E + decay * 1.0f;
             if (arbiter_) {
                 arbiter_->report_slot_acceptance(1);

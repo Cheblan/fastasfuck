@@ -233,6 +233,15 @@ std::optional<MtpCalibratedProfile> load_cached_profile(
         }
         if (res.hw.verify_latencies.size() < 25) return std::nullopt;
 
+        const json::Value *solo_grid = hw->find("solo_verify_ms_grid");
+        if (solo_grid && solo_grid->is_array()) {
+            res.hw.solo_verify_latencies.clear();
+            for (const auto &item : solo_grid->as_array("solo_verify_ms_grid")) {
+                res.hw.solo_verify_latencies.push_back(static_cast<float>(item.as_double("grid_item")));
+            }
+        }
+        if (res.hw.solo_verify_latencies.size() < 9) return std::nullopt;
+
         const json::Value *acc = prof->find("acceptance_model");
         if (acc && acc->is_object()) {
             const json::Value *v_alpha = acc->find("alpha");
@@ -312,6 +321,12 @@ bool save_cached_profile(
         grid.push(json::Value::number(v));
     }
     hw.set("verify_ms_grid", grid);
+
+    json::Value solo_grid = json::Value::array();
+    for (float v : profile.hw.solo_verify_latencies) {
+        solo_grid.push(json::Value::number(v));
+    }
+    hw.set("solo_verify_ms_grid", solo_grid);
     p.set("hardware_latencies", hw);
 
     json::Value acc = json::Value::object();
