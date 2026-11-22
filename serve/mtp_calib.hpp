@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -29,19 +30,31 @@ struct MtpCalibrationConfig {
 };
 
 struct MtpHardwareProfile {
-    float draft_step_ms = 1.64f;
-    float verify_base_ms = 26.84f;
-    float verify_step_ms = 4.30f;
+    float draft_step_ms = 1.64f;            // solo draft latency (m = 1)
+    float draft_batch_step_ms = 1.64f;      // batched draft latency (m = n_slots)
+    float verify_base_ms = 25.10f;
+    float verify_step_ms = 2.50f;
     std::vector<float> verify_latencies = {
-        0.0f, 26.84f, 32.13f, 36.62f, 41.60f, 46.11f, 46.89f, 50.04f, 54.33f
+        0.0f, 25.10f, 30.30f, 34.96f, 39.63f, 42.66f, 45.69f, 50.65f, 55.61f,
+        58.05f, 60.49f, 63.20f, 65.92f, 68.72f, 71.53f, 72.39f, 73.25f, 75.87f,
+        78.85f, 81.84f, 85.46f, 89.09f, 92.70f, 96.30f, 100.0f
     };
 
     float get_verify_cost(int64_t T) const {
         if (T <= 0) return 0.0f;
+        if (verify_latencies.empty()) return (float)T * 4.0f;
         if ((size_t)T < verify_latencies.size()) {
             return verify_latencies[(size_t)T];
         }
         return verify_latencies.back() + (float)(T - (int64_t)(verify_latencies.size() - 1)) * verify_step_ms;
+    }
+
+    float get_draft_cost(int m, int total_slots) const {
+        if (m <= 1 || total_slots <= 1 || draft_batch_step_ms <= 0.0f) {
+            return draft_step_ms;
+        }
+        float frac = std::clamp((float)(m - 1) / (float)(total_slots - 1), 0.0f, 1.0f);
+        return draft_step_ms + frac * (draft_batch_step_ms - draft_step_ms);
     }
 };
 

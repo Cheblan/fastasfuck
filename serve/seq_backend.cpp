@@ -238,7 +238,20 @@ void GpuArbiter::run_batch(std::unique_lock<std::mutex> &lock) {
     }
     lock.lock();
     busy_ = false;
-    last_batch_seconds_ = now_s() - t0;
+    const double actual_verify_ms = (now_s() - t0) * 1e3;
+    last_batch_seconds_ = actual_verify_ms / 1e3;
+    if (!err && hw_prof_) {
+        float expected_v_ms = hw_prof_->get_verify_cost(rows);
+        if (expected_v_ms > 1.0f) {
+            float ratio = (float)actual_verify_ms / expected_v_ms;
+            ratio = std::clamp(ratio, 0.5f, 3.0f);
+            s_verify_ = (1.0f - kEmaDecay) * s_verify_ + kEmaDecay * ratio;
+        }
+        float round_gpu_ms = (float)actual_verify_ms + (float)draft_ms_accum_;
+        draft_ms_accum_ = 0.0;
+        ema_round_gpu_ms_ = (1.0f - kEmaDecay) * ema_round_gpu_ms_ + kEmaDecay * round_gpu_ms;
+        ema_batch_runs_ = (1.0f - kEmaDecay) * ema_batch_runs_ + kEmaDecay * (float)members.size();
+    }
     if (err && be_.failed()) {
         for (int m : members) pending_[m].done = true, pending_[m].error = err;  // the batch's own error
         fail_locked();  // the rest: abandoned
@@ -297,6 +310,7 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
 
     std::vector<Top2> results;
     std::exception_ptr err;
+    const double t0 = now_s();
     try {
         results = be_.forward_mtp_top2_batch(runs);
         STRIX_CHECK(results.size() == runs.size(), "GpuArbiter: forward_mtp_top2_batch returned ",
@@ -307,6 +321,16 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
 
     lock.lock();
     busy_ = false;
+    const double actual_draft_ms = (now_s() - t0) * 1e3;
+    draft_ms_accum_ += actual_draft_ms;
+    if (!err && hw_prof_) {
+        float expected_d_ms = hw_prof_->get_draft_cost((int)members.size(), (int)epoch_.size());
+        if (expected_d_ms > 0.1f) {
+            float ratio = (float)actual_draft_ms / expected_d_ms;
+            ratio = std::clamp(ratio, 0.5f, 3.0f);
+            s_draft_ = (1.0f - kEmaDecay) * s_draft_ + kEmaDecay * ratio;
+        }
+    }
     if (err && be_.failed()) {
         for (int m : members) {
             pending_drafts_[m].done = true;
@@ -434,6 +458,48 @@ bool GpuArbiter::stale(int seq) const {
 int GpuArbiter::decoding_count() const {
     std::lock_guard<std::mutex> lock(mu_);
     return (int)decoding_.size();
+}
+
+int GpuArbiter::pending_verifies_count() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return (int)pending_.size();
+}
+
+int64_t GpuArbiter::pending_verify_rows() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    int64_t rows = 0;
+    for (const auto &[s, p] : pending_) {
+        rows += (int64_t)p.run.ids.size();
+    }
+    return rows;
+}
+
+int GpuArbiter::active_drafting_count() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    int n = (int)decoding_.size();
+    int pending_v = (int)pending_.size();
+    return std::max(1, n - pending_v);
+}
+
+float GpuArbiter::cluster_tau() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    float denom = std::max(1.0f, ema_batch_runs_ * ema_slot_E_);
+    return std::max(1.0f, ema_round_gpu_ms_ / denom);
+}
+
+float GpuArbiter::scale_verify() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return s_verify_;
+}
+
+float GpuArbiter::scale_draft() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return s_draft_;
+}
+
+void GpuArbiter::report_slot_acceptance(int accepted) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ema_slot_E_ = (1.0f - kEmaDecay) * ema_slot_E_ + kEmaDecay * (float)accepted;
 }
 
 bool GpuArbiter::others_decoding(int seq) const {

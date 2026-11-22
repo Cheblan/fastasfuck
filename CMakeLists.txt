@@ -268,6 +268,9 @@ target_link_libraries(test_vision_batchable_edge_cases PRIVATE strix_serve_model
 add_executable(eval_ppl_kld tools/eval_ppl_kld.cpp)
 target_link_libraries(eval_ppl_kld PRIVATE strix_serve_model)
 
+add_executable(measure_verify_curve tools/measure_verify_curve.cpp)
+target_link_libraries(measure_verify_curve PRIVATE strix_serve_model)
+
 add_executable(test_linear_q6 tools/test_linear_q6.cpp)
 target_link_libraries(test_linear_q6 PRIVATE strix_kernels strix_formats)
 

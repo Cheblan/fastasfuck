@@ -438,36 +438,120 @@ int run(int argc, char **argv) {
                     hw_prof.draft_step_ms = meas_draft_ms;
                 }
 
-                // 3. Calibrate verify latencies for T = 1..8
-                // Use diverse tokens from realistic text/code to activate representative unique MoE experts across layers
-                static const int32_t kCalibTokens[8] = {1532, 9481, 32114, 843, 19283, 4412, 27150, 6819};
-                std::vector<float> verify_grid = {0.0f};
-                for (int k = 1; k <= 8; ++k) {
-                    std::vector<int32_t> test_ids(kCalibTokens, kCalibTokens + k);
+                // 2b. Calibrate batched draft_batch_step_ms for m = total_slots
+                if (total_slots >= 2) {
+                    std::vector<LmBackend::MtpDraftRun> batch_runs;
+                    for (int s = 0; s < total_slots; ++s) {
+                        batch_runs.push_back({s, 100 + s, 0});
+                    }
+                    std::vector<float> b_times;
+                    for (int t = 0; t < 2; ++t) backend.forward_mtp_top2_batch(batch_runs); // warmup
+                    for (int t = 0; t < 5; ++t) {
+                        const auto t0 = std::chrono::steady_clock::now();
+                        backend.forward_mtp_top2_batch(batch_runs);
+                        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                        b_times.push_back((float)ms);
+                    }
+                    const float meas_b_draft_ms = compute_median(b_times);
+                    if (meas_b_draft_ms > 0.1f && meas_b_draft_ms < 50.0f) {
+                        hw_prof.draft_batch_step_ms = meas_b_draft_ms;
+                    }
+                } else {
+                    hw_prof.draft_batch_step_ms = hw_prof.draft_step_ms;
+                }
+
+                // 3. Calibrate verify latencies for T across nodes {1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24}
+                // Pre-warm context to pos >= 64 across active slots with diverse tokens from code, math, Russian, systems
+                const std::string calib_text =
+                    "Write a robust, production-ready asynchronous task execution DAG in Python 3.12 using asyncio. "
+                    "Tasks are nodes with dependencies; each task has an async execute() method and a timeout. "
+                    "State and prove the Riemann-Lebesgue Lemma for functions in L1(R) using step functions. "
+                    "Explain the exact mechanical walk of a 4-level x86_64 page table lookup from VA to PA. "
+                    "Проанализируйте следующий фрагмент технического текста: The zero-copy Unified Memory "
+                    "Architecture exposes concurrent lock contention across HSA queue ringbuffers. "
+                    "Evaluate whether any tool call is warranted: execute_database_drop. "
+                    "Deficit Round Robin fairness between prefill and decode passes on AMD Strix Halo.";
+                const std::vector<int32_t> calib_all = tok.encode(calib_text);
+                STRIX_CHECK(calib_all.size() >= 128, "Calibration corpus too short: ", calib_all.size());
+
+                if (total_slots >= 4) {
+                    for (int s = 0; s < 4; ++s) {
+                        std::vector<int32_t> ptok(calib_all.begin() + s * 16, calib_all.begin() + (s + 1) * 16 + 48);
+                        backend.forward_rows(s, ptok, 1, false, 0);
+                    }
+                } else {
+                    std::vector<int32_t> ptok(calib_all.begin(), calib_all.begin() + 64);
+                    backend.forward_rows(0, ptok, 1, false, 0);
+                }
+
+                const std::vector<int> kNodes = {1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24};
+                std::map<int, float> node_latencies;
+                for (int k : kNodes) {
+                    std::vector<LmBackend::VerifyRun> runs;
+                    if (total_slots >= 4 && k >= 4) {
+                        const int base_r = k / 4;
+                        const int rem = k % 4;
+                        size_t offset = 0;
+                        for (int s = 0; s < 4; ++s) {
+                            int count = base_r + (s < rem ? 1 : 0);
+                            if (count > 0) {
+                                std::vector<int32_t> slot_ids(calib_all.begin() + offset, calib_all.begin() + offset + count);
+                                runs.push_back({s, slot_ids, nullptr});
+                                offset += count;
+                            }
+                        }
+                    } else if (total_slots >= 4) {
+                        for (int s = 0; s < k; ++s) {
+                            runs.push_back({s, {calib_all[s * 10]}, nullptr});
+                        }
+                    } else {
+                        std::vector<int32_t> test_ids(calib_all.begin(), calib_all.begin() + k);
+                        runs.push_back({0, test_ids, nullptr});
+                    }
+
+                    // 1 untimed warmup
+                    backend.verify_batch(runs, false, 0);
+                    for (const auto &r : runs) backend.drop_verify(r.seq);
+
                     std::vector<float> k_times;
                     for (int t = 0; t < 5; ++t) {
                         const auto t0 = std::chrono::steady_clock::now();
-                        backend.forward_verify(test_ids, 1);
+                        backend.verify_batch(runs, false, 0);
                         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-                        backend.drop_verify();
+                        for (const auto &r : runs) backend.drop_verify(r.seq);
                         k_times.push_back((float)ms);
                     }
-                    float v_med = compute_median(k_times);
-                    if (k > 1 && v_med <= verify_grid.back()) {
-                        v_med = verify_grid.back() + 1.0f; // physical monotonicity constraint
-                    }
-                    verify_grid.push_back(v_med);
+                    node_latencies[k] = compute_median(k_times);
                 }
                 backend.reset();
 
-                if (verify_grid.size() >= 9 && verify_grid[1] > 1.0f) {
-                    hw_prof.verify_latencies = verify_grid;
-                    hw_prof.verify_base_ms = verify_grid[1];
-                    hw_prof.verify_step_ms = std::max(0.1f, (verify_grid[8] - verify_grid[1]) / 7.0f);
+                // Piecewise linear interpolation to populate verify_grid[0..24]
+                std::vector<float> verify_grid(25, 0.0f);
+                verify_grid[0] = 0.0f;
+                for (size_t i = 0; i < kNodes.size(); ++i) {
+                    int n_curr = kNodes[i];
+                    float lat_curr = node_latencies[n_curr];
+                    if (i == 0) {
+                        verify_grid[n_curr] = lat_curr;
+                    } else {
+                        int n_prev = kNodes[i - 1];
+                        float lat_prev = node_latencies[n_prev];
+                        if (lat_curr <= lat_prev) lat_curr = lat_prev + 0.5f; // physical monotonicity constraint
+                        for (int j = n_prev + 1; j <= n_curr; ++j) {
+                            float frac = (float)(j - n_prev) / (float)(n_curr - n_prev);
+                            verify_grid[j] = lat_prev + frac * (lat_curr - lat_prev);
+                        }
+                    }
                 }
 
-                slog(LogLevel::Info, "startup: [MTP_CALIB] live calibration done: draft=%.2f ms, verify[1]=%.2f ms, verify[8]=%.2f ms, step=%.2f ms",
-                     hw_prof.draft_step_ms, hw_prof.verify_base_ms, hw_prof.verify_latencies.back(), hw_prof.verify_step_ms);
+                if (verify_grid.size() >= 25 && verify_grid[1] > 1.0f) {
+                    hw_prof.verify_latencies = verify_grid;
+                    hw_prof.verify_base_ms = verify_grid[1];
+                    hw_prof.verify_step_ms = std::max(0.1f, (verify_grid[24] - verify_grid[1]) / 23.0f);
+                }
+
+                slog(LogLevel::Info, "startup: [MTP_CALIB] live calibration done: draft(1)=%.2f ms, draft(%d)=%.2f ms, verify[1]=%.2f ms, verify[16]=%.2f ms, verify[24]=%.2f ms",
+                     hw_prof.draft_step_ms, (int)total_slots, hw_prof.draft_batch_step_ms, hw_prof.verify_base_ms, hw_prof.verify_latencies[16], hw_prof.verify_latencies[24]);
             } catch (const std::exception &ex) {
                 slog(LogLevel::Warning, "startup: [MTP_CALIB] live calibration failed (%s); using baseline", ex.what());
                 backend.reset();

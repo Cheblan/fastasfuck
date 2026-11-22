@@ -17,6 +17,7 @@
 // unchanged.
 
 #include "serve/engine.hpp"
+#include "serve/mtp_calib.hpp"
 
 #include <condition_variable>
 #include <exception>
@@ -67,6 +68,16 @@ public:
     bool others_decoding(int seq) const;
     // How many seqs are running a request's decode (the engine sizes its draft chains so their verifies fit one batch).
     int decoding_count() const;
+
+    // Multi-slot cluster metrics and hardware scaling
+    int pending_verifies_count() const;
+    int64_t pending_verify_rows() const;
+    int active_drafting_count() const;
+    float cluster_tau() const;
+    float scale_verify() const;
+    float scale_draft() const;
+    void report_slot_acceptance(int accepted);
+    void set_hw_profile(const MtpHardwareProfile *prof) { hw_prof_ = prof; }
 
     // How long a waiting verify holds its batch for a decoding seq that hasn't sent its own yet,
     // within [kBatchWaitMinSeconds, kBatchWaitMaxSeconds].
@@ -136,6 +147,15 @@ private:
     int last_prefill_seq_ = -1;             // seq that ran the last prefill chunk (for round-robin)
     std::vector<int> concurrent_;           // per-seq active run_concurrent calls (awaited by reset)
     int concurrent_total_ = 0;              // total active across all seqs (awaited by whole reset)
+
+    const MtpHardwareProfile *hw_prof_ = nullptr;
+    double draft_ms_accum_ = 0.0;
+    float s_verify_ = 1.0f;
+    float s_draft_ = 1.0f;
+    float ema_round_gpu_ms_ = 45.0f;
+    float ema_batch_runs_ = 3.5f;
+    float ema_slot_E_ = 2.0f;
+    static constexpr float kEmaDecay = 0.05f;
 };
 
 // One slot's view of the shared backend: LmBackend's single-conversation calls, mapped to seq's.

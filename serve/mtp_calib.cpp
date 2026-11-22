@@ -214,6 +214,10 @@ std::optional<MtpCalibratedProfile> load_cached_profile(
         const json::Value *v_draft = hw->find("draft_step_ms");
         if (v_draft) res.hw.draft_step_ms = static_cast<float>(v_draft->as_double("draft_step_ms"));
 
+        const json::Value *v_draft_b = hw->find("draft_batch_step_ms");
+        if (v_draft_b) res.hw.draft_batch_step_ms = static_cast<float>(v_draft_b->as_double("draft_batch_step_ms"));
+        else res.hw.draft_batch_step_ms = res.hw.draft_step_ms;
+
         const json::Value *v_base = hw->find("verify_base_ms");
         if (v_base) res.hw.verify_base_ms = static_cast<float>(v_base->as_double("verify_base_ms"));
 
@@ -227,6 +231,7 @@ std::optional<MtpCalibratedProfile> load_cached_profile(
                 res.hw.verify_latencies.push_back(static_cast<float>(item.as_double("grid_item")));
             }
         }
+        if (res.hw.verify_latencies.size() < 25) return std::nullopt;
 
         const json::Value *acc = prof->find("acceptance_model");
         if (acc && acc->is_object()) {
@@ -299,6 +304,7 @@ bool save_cached_profile(
 
     json::Value hw = json::Value::object();
     hw.set("draft_step_ms", json::Value::number(profile.hw.draft_step_ms));
+    hw.set("draft_batch_step_ms", json::Value::number(profile.hw.draft_batch_step_ms));
     hw.set("verify_base_ms", json::Value::number(profile.hw.verify_base_ms));
     hw.set("verify_step_ms", json::Value::number(profile.hw.verify_step_ms));
     json::Value grid = json::Value::array();

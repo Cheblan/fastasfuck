@@ -552,6 +552,9 @@ struct EngineStats {
     int64_t draft_batches = 0, draft_batch_runs = 0;    // batched MTP drafts (GpuArbiter) and their runs
     int64_t verify_alone = 0;  // verifies run alone: their conversation holds image rows (GpuArbiter Stats)
     int64_t decoding_slots = 0;  // slots in their decode loop (GpuArbiter::decoding_count; 0 with one slot)
+    double cluster_tau = 0;
+    double scale_verify = 1.0;
+    double scale_draft = 1.0;
     // Seconds since the last request finished (or the engine started); 0 while one runs or waits. `busy` alone reads
     // 1 through a steady agent session, so a batch client sampling it saw a "stuck" flag; this lets it
     // wait for a real gap (e.g. idle_seconds >= 2).

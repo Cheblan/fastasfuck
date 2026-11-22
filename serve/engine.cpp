@@ -28,33 +28,6 @@ struct HwLatencyStats {
 };
 static HwLatencyStats g_hw_stats;
 
-struct MtpKnot { float delta; float p; };
-static constexpr MtpKnot kMtpProbLut[] = {
-    {0.0f,  0.100f},
-    {0.4f,  0.205f},
-    {0.75f, 0.451f},
-    {1.25f, 0.592f},
-    {1.75f, 0.625f},
-    {3.0f,  0.932f},
-    {6.0f,  0.985f}
-};
-
-inline float interpolate_mtp_prob(float delta) {
-    constexpr size_t N = sizeof(kMtpProbLut) / sizeof(kMtpProbLut[0]);
-    if (delta <= kMtpProbLut[0].delta) return kMtpProbLut[0].p;
-    if (delta >= kMtpProbLut[N - 1].delta) return kMtpProbLut[N - 1].p;
-    for (size_t i = 1; i < N; ++i) {
-        if (delta <= kMtpProbLut[i].delta) {
-            const float d0 = kMtpProbLut[i - 1].delta;
-            const float d1 = kMtpProbLut[i].delta;
-            const float p0 = kMtpProbLut[i - 1].p;
-            const float p1 = kMtpProbLut[i].p;
-            const float t = (delta - d0) / (d1 - d0);
-            return p0 + t * (p1 - p0);
-        }
-    }
-    return kMtpProbLut[N - 1].p;
-}
 
 // Measured hardware latency profile on AMD Strix Halo (gfx1151, Qwen 3.8-Flash-Next in ms).
 // In-engine steady_clock measurements:
@@ -149,7 +122,10 @@ Engine::Engine(LmBackend &backend, const Tokenizer &tok, const Options &options)
     idle_since_ = now_s();
     const int n = be_.n_seqs();
     STRIX_CHECK(n >= 1 && n <= 8, "Engine: the backend holds ", n, " conversations, expected 1..8");
-    if (n > 1) arbiter_ = std::make_unique<GpuArbiter>(be_);
+    if (n > 1) {
+        arbiter_ = std::make_unique<GpuArbiter>(be_);
+        arbiter_->set_hw_profile(&options_.mtp_hw_profile);
+    }
     be_.set_on_slot_evicted([this](int k) {
         std::lock_guard<std::mutex> lock(mu_);
         if (k >= 0 && (size_t)k < slots_.size()) {
@@ -392,6 +368,9 @@ EngineStats Engine::stats() const {
         s.verify_batches = a.verify_batches, s.verify_batch_runs = a.verify_runs, s.verify_alone = a.verify_alone;
         s.draft_batches = a.draft_batches, s.draft_batch_runs = a.draft_runs;
         s.decoding_slots = arbiter_->decoding_count();
+        s.cluster_tau = (double)arbiter_->cluster_tau();
+        s.scale_verify = (double)arbiter_->scale_verify();
+        s.scale_draft = (double)arbiter_->scale_draft();
     }
     return s;
 }
@@ -1492,17 +1471,28 @@ void Engine::run(Job &job, Slot &sl) {
                 sl.be->prefetch_ple(ids, 0);
                 StructuredOutput::Cursor draft_at = so ? so->cursor() : StructuredOutput::Cursor{};
 
-                // Under Renewal-Reward theory, each slot evaluates its own marginal throughput trade-off:
-                // ema_T / ema_E is this slot's expected latency per accepted token.
-                const float tau_global = ema_T / std::max(1.0f, ema_E);
+                // Under Renewal-Reward theory, each slot evaluates its marginal throughput trade-off:
+                // For solo mode (n_dec <= 1): tau_global = ema_T / ema_E
+                // For multi-slot mode (n_dec > 1): tau_global is cluster-wide from GpuArbiter
+                const int n_dec = arbiter_ ? arbiter_->decoding_count() : 1;
+                const float tau_global = (n_dec > 1 && arbiter_) ? arbiter_->cluster_tau()
+                                                                 : (ema_T / std::max(1.0f, ema_E));
+                const float sv = (n_dec > 1 && arbiter_) ? arbiter_->scale_verify() : 1.0f;
+                const float sd = (n_dec > 1 && arbiter_) ? arbiter_->scale_draft() : 1.0f;
+                const float draft_step_ms = (mtp_cfg.hw_profile.draft_step_ms > 0.0f) ? mtp_cfg.hw_profile.draft_step_ms : (sl.be ? sl.be->mtp_draft_step_ms() : kDefaultMtpDraftStepMs);
 
                 float P_cum = 1.0f;
-                const float draft_step_ms = (mtp_cfg.hw_profile.draft_step_ms > 0.0f) ? mtp_cfg.hw_profile.draft_step_ms : (sl.be ? sl.be->mtp_draft_step_ms() : kDefaultMtpDraftStepMs);
 
                 for (int64_t step = 0; step < steps; ++step) {
                     const int64_t k_curr = step;
-                    const float delta_verify = get_verify_cost(k_curr + 2, &mtp_cfg.hw_profile) - get_verify_cost(k_curr + 1, &mtp_cfg.hw_profile);
-                    const float delta_T = draft_step_ms + delta_verify;
+                    const int m = (n_dec > 1 && arbiter_) ? arbiter_->active_drafting_count() : 1;
+                    const int64_t pending_rows = (n_dec > 1 && arbiter_) ? arbiter_->pending_verify_rows() : 0;
+                    const int64_t M_curr = pending_rows + (int64_t)m * (k_curr + 1);
+                    const float v_curr = get_verify_cost(M_curr, &mtp_cfg.hw_profile);
+                    const float v_next = get_verify_cost(M_curr + m, &mtp_cfg.hw_profile);
+                    const float delta_verify = ((v_next - v_curr) / (float)m) * sv;
+                    const float c_draft = mtp_cfg.hw_profile.get_draft_cost(m, (int)slots_.size()) * sd;
+                    const float delta_T = (c_draft / (float)m) + delta_verify;
 
                     // Stage 1: Pre-draft optimistic check (Cost mode only)
                     // Under Renewal-Reward criterion, if even optimistic p_{k+1} = 1.0 satisfies
@@ -1609,6 +1599,9 @@ void Engine::run(Job &job, Slot &sl) {
                     const float decay = mtp_cfg.ema_decay;
                     ema_T = (1.0f - decay) * ema_T + decay * round_T;
                     ema_E = (1.0f - decay) * ema_E + decay * round_E;
+                    if (arbiter_) {
+                        arbiter_->report_slot_acceptance(1 + (int)acc);
+                    }
 
                     if (cut) {  // at the budget's stop (above): id and j accepted drafts kept
                         sl.be->keep_verify_prefix(ids, j + 1);
@@ -1690,6 +1683,9 @@ void Engine::run(Job &job, Slot &sl) {
             const float decay = mtp_cfg.ema_decay;
             ema_T = (1.0f - decay) * ema_T + decay * get_verify_cost(1, &mtp_cfg.hw_profile);
             ema_E = (1.0f - decay) * ema_E + decay * 1.0f;
+            if (arbiter_) {
+                arbiter_->report_slot_acceptance(1);
+            }
         }
         decoding.end();
         parser.finish(events);

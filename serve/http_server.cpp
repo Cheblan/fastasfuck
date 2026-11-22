@@ -856,6 +856,9 @@ void HttpServer::routes() {
         metric("strix_draft_batches_total", "counter", "Batched MTP drafts across slots.", (double)s.draft_batches);
         metric("strix_draft_batch_runs_total", "counter",
                "Slots' runs in those batched drafts (/ batches = runs per batched draft).", (double)s.draft_batch_runs);
+        metric("strix_cluster_tau_ms", "gauge", "Cluster-wide cost per accepted token (Renewal-Reward tau).", s.cluster_tau);
+        metric("strix_scale_verify", "gauge", "Live EMA scale factor for verify latency.", s.scale_verify);
+        metric("strix_scale_draft", "gauge", "Live EMA scale factor for draft latency.", s.scale_draft);
         metric("strix_idle_seconds", "gauge",
                "Seconds since the last request finished; 0 while one runs or waits. Batch clients: wait for a gap here.",
                s.idle_seconds);
