@@ -7,7 +7,7 @@ Type=simple
 WorkingDirectory=%h/strixite-main
 LimitMEMLOCK=infinity
 LimitNOFILE=1048576
-Environment=HSA_OVERRIDE_GFX_VERSION=11.5.1
+# Environment=HSA_OVERRIDE_GFX_VERSION=11.5.1  # Uncomment for older ROCm versions lacking native gfx1151 support
 Environment=HSA_DISABLE_COREDUMP_ON_EXCEPTION=1
 Environment=STRIX_WEIGHTS=/models/Thinking-Cap-Qwen-3.8-FN-strixw/weights.strixw
 Environment=STRIX_EXTRA_ARGS=

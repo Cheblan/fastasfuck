@@ -884,8 +884,13 @@ void HttpServer::routes() {
             ~WsGuard() { c--; }
         } ws_guard{active_ws_conns_};
 
-        std::shared_ptr<QueueSink> current_sink = nullptr;
-        std::mutex sink_mutex;
+        struct SessionState {
+            std::mutex mu;
+            std::shared_ptr<QueueSink> active_sink;
+            std::thread worker;
+            std::atomic<bool> closed{false};
+        };
+        auto state = std::make_shared<SessionState>();
 
         std::string msg;
         while (ws.read(msg) == httplib::ws::ReadResult::Text) {
@@ -910,8 +915,10 @@ void HttpServer::routes() {
             }
 
             if (frame_type == "response.cancel") {
-                std::lock_guard<std::mutex> lk(sink_mutex);
-                if (current_sink) current_sink->cancel();
+                std::lock_guard<std::mutex> lk(state->mu);
+                if (state->active_sink) {
+                    state->active_sink->cancel();
+                }
                 continue;
             }
 
@@ -919,9 +926,21 @@ void HttpServer::routes() {
                 continue;
             }
 
-            const json::Value *req_obj = &body;
+            // Before starting a new generation on this connection, join any previous worker
+            {
+                std::lock_guard<std::mutex> lk(state->mu);
+                if (state->active_sink) state->active_sink->cancel();
+            }
+            if (state->worker.joinable()) {
+                state->worker.join();
+            }
+
+            // Merge top-level body with nested "response" (if present) so flat and nested formats both work
+            json::Value req_obj = body;
             if (const json::Value *resp_field = body.find("response"); resp_field && resp_field->is_object()) {
-                req_obj = resp_field;
+                for (const auto &[k, v] : resp_field->as_object("response")) {
+                    req_obj.set(k, v);
+                }
             }
 
             const int64_t id = ++next_id_;
@@ -935,7 +954,7 @@ void HttpServer::routes() {
             int64_t prefix_len = 0;
             auto tools = std::make_shared<json::Value>();
             try {
-                rr = parse_responses_request(*req_obj, cfg_.defaults);
+                rr = parse_responses_request(req_obj, cfg_.defaults);
                 if (!cfg_.thinking_default && !rr.template_options.enable_thinking.has_value()) {
                     rr.template_options.enable_thinking = false;
                 }
@@ -988,13 +1007,17 @@ void HttpServer::routes() {
 
             auto sink = std::make_shared<QueueSink>();
             {
-                std::lock_guard<std::mutex> lk(sink_mutex);
-                current_sink = sink;
+                std::lock_guard<std::mutex> lk(state->mu);
+                state->active_sink = sink;
             }
 
             try {
                 engine_.submit(std::move(gen), sink);
             } catch (const Error &e) {
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    state->active_sink = nullptr;
+                }
                 json::Value err = json::Value::object();
                 err.set("type", json::Value::string("error"));
                 json::Value ed = json::Value::object();
@@ -1005,212 +1028,226 @@ void HttpServer::routes() {
                 continue;
             }
 
-            int64_t seq = 0;
-            const auto send_ev = [&](const std::string &, const std::string &json_data) {
-                if (!ws.send(json_data)) {
-                    sink->cancel();
-                    return false;
-                }
-                return true;
-            };
-
-            if (!send_ev("response.created", response_created_event(seq++, resp_id, cfg_.model_id, created_at))) break;
-            if (!send_ev("response.in_progress", response_in_progress_event(seq++, resp_id, cfg_.model_id, created_at))) break;
-
-            int output_index = 0;
-            bool reasoning_started = false;
-            bool message_started = false;
-            std::string rs_id = "rs_" + random_id("");
-            std::string msg_id = "msg_" + random_id("");
-            std::string acc_reasoning;
-            std::string acc_content;
-            json::Value completed_output_items = json::Value::array();
-
-            QueueSink::Item it;
-            bool client_disconnected = false;
-            for (;;) {
-                if (!sink->pop(it, cfg_.keepalive_s)) {
-                    if (!ws.is_open()) {
+            // Spawn streamer worker for this turn
+            state->worker = std::thread([this, &ws, state, sink, tools, resp_id, created_at, rr]() mutable {
+                int64_t seq = 0;
+                const auto send_ev = [&](const std::string &, const std::string &json_data) {
+                    if (!ws.send(json_data)) {
                         sink->cancel();
-                        client_disconnected = true;
-                        break;
+                        return false;
                     }
-                    continue;
-                }
+                    return true;
+                };
 
-                switch (it.kind) {
-                case QueueSink::Item::Kind::Start:
-                case QueueSink::Item::Kind::Progress:
-                    break;
-                case QueueSink::Item::Kind::Events:
-                    for (const auto &ev : it.events) {
-                        if (ev.kind == OutputEvent::Kind::Reasoning) {
-                            if (!reasoning_started) {
+                if (!send_ev("response.created", response_created_event(seq++, resp_id, cfg_.model_id, created_at))) return;
+                if (!send_ev("response.in_progress", response_in_progress_event(seq++, resp_id, cfg_.model_id, created_at))) return;
+
+                int output_index = 0;
+                bool reasoning_started = false;
+                bool message_started = false;
+                std::string rs_id = "rs_" + random_id("");
+                std::string msg_id = "msg_" + random_id("");
+                std::string acc_reasoning;
+                std::string acc_content;
+                json::Value completed_output_items = json::Value::array();
+
+                QueueSink::Item it;
+                bool client_disconnected = false;
+                for (;;) {
+                    if (!sink->pop(it, cfg_.keepalive_s)) {
+                        if (!ws.is_open() || state->closed.load()) {
+                            sink->cancel();
+                            client_disconnected = true;
+                            break;
+                        }
+                        continue;
+                    }
+
+                    switch (it.kind) {
+                    case QueueSink::Item::Kind::Start:
+                    case QueueSink::Item::Kind::Progress:
+                        break;
+                    case QueueSink::Item::Kind::Events:
+                        for (const auto &ev : it.events) {
+                            if (ev.kind == OutputEvent::Kind::Reasoning) {
+                                if (!reasoning_started) {
+                                    json::Value item = json::Value::object();
+                                    item.set("id", json::Value::string(rs_id));
+                                    item.set("type", json::Value::string("reasoning"));
+                                    item.set("status", json::Value::string("in_progress"));
+                                    item.set("summary", json::Value::array());
+                                    if (!send_ev("response.output_item.added", response_output_item_added_event(seq++, resp_id, output_index, item))) {
+                                        client_disconnected = true;
+                                        break;
+                                    }
+                                    reasoning_started = true;
+                                }
+                                if (!send_ev("response.reasoning_text.delta", response_reasoning_text_delta_event(seq++, resp_id, rs_id, output_index, ev.text))) {
+                                    client_disconnected = true;
+                                    break;
+                                }
+                                acc_reasoning += ev.text;
+                            } else if (ev.kind == OutputEvent::Kind::Content) {
+                                if (reasoning_started) {
+                                    if (!send_ev("response.reasoning_text.done", response_reasoning_text_done_event(seq++, resp_id, rs_id, output_index, acc_reasoning))) {
+                                        client_disconnected = true;
+                                        break;
+                                    }
+                                    json::Value item = json::Value::object();
+                                    item.set("id", json::Value::string(rs_id));
+                                    item.set("type", json::Value::string("reasoning"));
+                                    item.set("status", json::Value::string("completed"));
+                                    item.set("summary", json::Value::array());
+                                    if (!send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item))) {
+                                        client_disconnected = true;
+                                        break;
+                                    }
+                                    completed_output_items.push(std::move(item));
+                                    reasoning_started = false;
+                                    output_index++;
+                                }
+                                if (!message_started) {
+                                    json::Value item = json::Value::object();
+                                    item.set("id", json::Value::string(msg_id));
+                                    item.set("type", json::Value::string("message"));
+                                    item.set("status", json::Value::string("in_progress"));
+                                    item.set("role", json::Value::string("assistant"));
+                                    item.set("content", json::Value::array());
+                                    if (!send_ev("response.output_item.added", response_output_item_added_event(seq++, resp_id, output_index, item))) {
+                                        client_disconnected = true;
+                                        break;
+                                    }
+                                    if (!send_ev("response.content_part.added", response_content_part_added_event(seq++, resp_id, msg_id, output_index, 0))) {
+                                        client_disconnected = true;
+                                        break;
+                                    }
+                                    message_started = true;
+                                }
+                                if (!send_ev("response.output_text.delta", response_output_text_delta_event(seq++, resp_id, msg_id, output_index, 0, ev.text))) {
+                                    client_disconnected = true;
+                                    break;
+                                }
+                                acc_content += ev.text;
+                            } else if (ev.kind == OutputEvent::Kind::ToolCall) {
+                                if (reasoning_started) {
+                                    if (!send_ev("response.reasoning_text.done", response_reasoning_text_done_event(seq++, resp_id, rs_id, output_index, acc_reasoning))) {
+                                        client_disconnected = true;
+                                        break;
+                                    }
+                                    json::Value item = json::Value::object();
+                                    item.set("id", json::Value::string(rs_id));
+                                    item.set("type", json::Value::string("reasoning"));
+                                    item.set("status", json::Value::string("completed"));
+                                    item.set("summary", json::Value::array());
+                                    if (!send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item))) {
+                                        client_disconnected = true;
+                                        break;
+                                    }
+                                    completed_output_items.push(std::move(item));
+                                    reasoning_started = false;
+                                    output_index++;
+                                }
+                                std::string fc_id = "fc_" + ev.call.id;
                                 json::Value item = json::Value::object();
-                                item.set("id", json::Value::string(rs_id));
-                                item.set("type", json::Value::string("reasoning"));
+                                item.set("id", json::Value::string(fc_id));
+                                item.set("type", json::Value::string("function_call"));
                                 item.set("status", json::Value::string("in_progress"));
-                                item.set("summary", json::Value::array());
+                                item.set("call_id", json::Value::string(ev.call.id));
+                                item.set("name", json::Value::string(ev.call.name));
+                                item.set("arguments", json::Value::string(""));
                                 if (!send_ev("response.output_item.added", response_output_item_added_event(seq++, resp_id, output_index, item))) {
                                     client_disconnected = true;
                                     break;
                                 }
-                                reasoning_started = true;
-                            }
-                            if (!send_ev("response.reasoning_text.delta", response_reasoning_text_delta_event(seq++, resp_id, rs_id, output_index, ev.text))) {
-                                client_disconnected = true;
-                                break;
-                            }
-                            acc_reasoning += ev.text;
-                        } else if (ev.kind == OutputEvent::Kind::Content) {
-                            if (reasoning_started) {
-                                if (!send_ev("response.reasoning_text.done", response_reasoning_text_done_event(seq++, resp_id, rs_id, output_index, acc_reasoning))) {
+                                std::string args_json = ev.call.arguments.dump();
+                                if (!send_ev("response.function_call_arguments.delta", response_function_call_args_delta_event(seq++, resp_id, fc_id, output_index, ev.call.id, args_json))) {
                                     client_disconnected = true;
                                     break;
                                 }
-                                json::Value item = json::Value::object();
-                                item.set("id", json::Value::string(rs_id));
-                                item.set("type", json::Value::string("reasoning"));
+                                if (!send_ev("response.function_call_arguments.done", response_function_call_args_done_event(seq++, resp_id, fc_id, output_index, ev.call.id, args_json))) {
+                                    client_disconnected = true;
+                                    break;
+                                }
                                 item.set("status", json::Value::string("completed"));
-                                item.set("summary", json::Value::array());
+                                item.set("arguments", json::Value::string(args_json));
                                 if (!send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item))) {
                                     client_disconnected = true;
                                     break;
                                 }
                                 completed_output_items.push(std::move(item));
-                                reasoning_started = false;
                                 output_index++;
                             }
-                            if (!message_started) {
-                                json::Value item = json::Value::object();
-                                item.set("id", json::Value::string(msg_id));
-                                item.set("type", json::Value::string("message"));
-                                item.set("status", json::Value::string("in_progress"));
-                                item.set("role", json::Value::string("assistant"));
-                                item.set("content", json::Value::array());
-                                if (!send_ev("response.output_item.added", response_output_item_added_event(seq++, resp_id, output_index, item))) {
-                                    client_disconnected = true;
-                                    break;
-                                }
-                                if (!send_ev("response.content_part.added", response_content_part_added_event(seq++, resp_id, msg_id, output_index, 0))) {
-                                    client_disconnected = true;
-                                    break;
-                                }
-                                message_started = true;
-                            }
-                            if (!send_ev("response.output_text.delta", response_output_text_delta_event(seq++, resp_id, msg_id, output_index, 0, ev.text))) {
-                                client_disconnected = true;
-                                break;
-                            }
-                            acc_content += ev.text;
-                        } else if (ev.kind == OutputEvent::Kind::ToolCall) {
-                            if (reasoning_started) {
-                                if (!send_ev("response.reasoning_text.done", response_reasoning_text_done_event(seq++, resp_id, rs_id, output_index, acc_reasoning))) {
-                                    client_disconnected = true;
-                                    break;
-                                }
-                                json::Value item = json::Value::object();
-                                item.set("id", json::Value::string(rs_id));
-                                item.set("type", json::Value::string("reasoning"));
-                                item.set("status", json::Value::string("completed"));
-                                item.set("summary", json::Value::array());
-                                if (!send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item))) {
-                                    client_disconnected = true;
-                                    break;
-                                }
-                                completed_output_items.push(std::move(item));
-                                reasoning_started = false;
-                                output_index++;
-                            }
-                            std::string fc_id = "fc_" + ev.call.id;
+                        }
+                        break;
+                    case QueueSink::Item::Kind::Done: {
+                        const GenerationResult &r = it.result;
+                        if (reasoning_started) {
+                            send_ev("response.reasoning_text.done", response_reasoning_text_done_event(seq++, resp_id, rs_id, output_index, acc_reasoning));
                             json::Value item = json::Value::object();
-                            item.set("id", json::Value::string(fc_id));
-                            item.set("type", json::Value::string("function_call"));
-                            item.set("status", json::Value::string("in_progress"));
-                            item.set("call_id", json::Value::string(ev.call.id));
-                            item.set("name", json::Value::string(ev.call.name));
-                            item.set("arguments", json::Value::string(""));
-                            if (!send_ev("response.output_item.added", response_output_item_added_event(seq++, resp_id, output_index, item))) {
-                                client_disconnected = true;
-                                break;
-                            }
-                            std::string args_json = ev.call.arguments.dump();
-                            if (!send_ev("response.function_call_arguments.delta", response_function_call_args_delta_event(seq++, resp_id, fc_id, output_index, ev.call.id, args_json))) {
-                                client_disconnected = true;
-                                break;
-                            }
-                            if (!send_ev("response.function_call_arguments.done", response_function_call_args_done_event(seq++, resp_id, fc_id, output_index, ev.call.id, args_json))) {
-                                client_disconnected = true;
-                                break;
-                            }
+                            item.set("id", json::Value::string(rs_id));
+                            item.set("type", json::Value::string("reasoning"));
                             item.set("status", json::Value::string("completed"));
-                            item.set("arguments", json::Value::string(args_json));
-                            if (!send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item))) {
-                                client_disconnected = true;
-                                break;
-                            }
+                            item.set("summary", json::Value::array());
+                            send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item));
                             completed_output_items.push(std::move(item));
                             output_index++;
                         }
+                        if (message_started) {
+                            send_ev("response.output_text.done", response_output_text_done_event(seq++, resp_id, msg_id, output_index, 0, acc_content));
+                            send_ev("response.content_part.done", response_content_part_done_event(seq++, resp_id, msg_id, output_index, 0, acc_content));
+                            json::Value item = json::Value::object();
+                            item.set("id", json::Value::string(msg_id));
+                            item.set("type", json::Value::string("message"));
+                            item.set("status", json::Value::string("completed"));
+                            item.set("role", json::Value::string("assistant"));
+                            json::Value cparts = json::Value::array();
+                            json::Value p = json::Value::object();
+                            p.set("type", json::Value::string("output_text"));
+                            p.set("text", json::Value::string(acc_content));
+                            cparts.push(std::move(p));
+                            item.set("content", std::move(cparts));
+                            send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item));
+                            completed_output_items.push(std::move(item));
+                            output_index++;
+                        }
+
+                        if (!r.tokens.empty()) {
+                            response_store_.put({
+                                resp_id,
+                                r.tokens,
+                                rr.instructions,
+                                rr.tools,
+                                compute_responses_config_hash(rr.instructions, rr.tools),
+                                created_at
+                            });
+                        }
+
+                        const bool incomplete = (r.finish_reason == "length" || r.finish_reason == "cancelled");
+                        const std::string term_ev = (r.finish_reason == "error") ? "response.failed"
+                                                  : incomplete ? "response.incomplete" : "response.completed";
+                        send_ev(term_ev, response_completed_event(seq++, resp_id, cfg_.model_id, created_at, completed_output_items, r, incomplete));
+                        break;
                     }
-                    break;
-                case QueueSink::Item::Kind::Done: {
-                    const GenerationResult &r = it.result;
-                    if (reasoning_started) {
-                        send_ev("response.reasoning_text.done", response_reasoning_text_done_event(seq++, resp_id, rs_id, output_index, acc_reasoning));
-                        json::Value item = json::Value::object();
-                        item.set("id", json::Value::string(rs_id));
-                        item.set("type", json::Value::string("reasoning"));
-                        item.set("status", json::Value::string("completed"));
-                        item.set("summary", json::Value::array());
-                        send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item));
-                        completed_output_items.push(std::move(item));
-                        output_index++;
-                    }
-                    if (message_started) {
-                        send_ev("response.output_text.done", response_output_text_done_event(seq++, resp_id, msg_id, output_index, 0, acc_content));
-                        send_ev("response.content_part.done", response_content_part_done_event(seq++, resp_id, msg_id, output_index, 0, acc_content));
-                        json::Value item = json::Value::object();
-                        item.set("id", json::Value::string(msg_id));
-                        item.set("type", json::Value::string("message"));
-                        item.set("status", json::Value::string("completed"));
-                        item.set("role", json::Value::string("assistant"));
-                        json::Value cparts = json::Value::array();
-                        json::Value p = json::Value::object();
-                        p.set("type", json::Value::string("output_text"));
-                        p.set("text", json::Value::string(acc_content));
-                        cparts.push(std::move(p));
-                        item.set("content", std::move(cparts));
-                        send_ev("response.output_item.done", response_output_item_done_event(seq++, resp_id, output_index, item));
-                        completed_output_items.push(std::move(item));
-                        output_index++;
                     }
 
-                    if (!r.tokens.empty()) {
-                        response_store_.put({
-                            resp_id,
-                            r.tokens,
-                            rr.instructions,
-                            rr.tools,
-                            compute_responses_config_hash(rr.instructions, rr.tools),
-                            created_at
-                        });
-                    }
-
-                    send_ev(r.finish_reason == "length" ? "response.incomplete" : "response.completed",
-                            response_completed_event(seq++, resp_id, cfg_.model_id, created_at, completed_output_items, r, r.finish_reason == "length"));
-                    break;
-                }
+                    if (client_disconnected || it.kind == QueueSink::Item::Kind::Done) break;
                 }
 
-                if (client_disconnected || it.kind == QueueSink::Item::Kind::Done) break;
-            }
+                {
+                    std::lock_guard<std::mutex> lk(state->mu);
+                    state->active_sink = nullptr;
+                }
+            });
+        }
 
-            {
-                std::lock_guard<std::mutex> lk(sink_mutex);
-                current_sink = nullptr;
-            }
-            if (client_disconnected) break;
+        // Connection closed: clean up active turn and wait for worker thread to exit
+        state->closed = true;
+        {
+            std::lock_guard<std::mutex> lk(state->mu);
+            if (state->active_sink) state->active_sink->cancel();
+        }
+        if (state->worker.joinable()) {
+            state->worker.join();
         }
     });
 
