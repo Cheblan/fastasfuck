@@ -263,7 +263,9 @@ std::vector<int32_t> build_responses_prompt(
         for (const auto &item : req.input_items) {
             if (item.kind == ResponsesInputItem::Kind::Message) {
                 json::Value m = json::Value::object();
-                m.set("role", json::Value::string(item.role));
+                std::string role = item.role;
+                if (role == "developer") role = "system";
+                m.set("role", json::Value::string(role));
                 m.set("content", json::Value::string(item.content));
                 msg_list.push_back(std::move(m));
             } else if (item.kind == ResponsesInputItem::Kind::FunctionCall) {
@@ -364,7 +366,9 @@ std::vector<int32_t> build_responses_prompt(
     // Handle user/assistant messages in input
     for (const auto &item : req.input_items) {
         if (item.kind == ResponsesInputItem::Kind::Message) {
-            delta_str += "<|im_start|>" + item.role + "\n";
+            std::string role = item.role;
+            if (role == "developer") role = "system";
+            delta_str += "<|im_start|>" + role + "\n";
             const size_t s = delta_str.size();
             delta_str += item.content;
             plain_spans.emplace_back(s, delta_str.size());

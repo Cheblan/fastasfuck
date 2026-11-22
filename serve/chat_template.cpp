@@ -159,7 +159,11 @@ std::string render_chat(const json::Value &messages, const json::Value *tools, c
     const auto &msgs = messages.as_array("messages");
     STRIX_CHECK(!msgs.empty(), "chat template: No messages provided.");
     std::vector<std::string> roles;
-    for (size_t k = 0; k < msgs.size(); ++k) roles.push_back(role_of(msgs[k], "messages[" + std::to_string(k) + "]"));
+    for (size_t k = 0; k < msgs.size(); ++k) {
+        std::string r = role_of(msgs[k], "messages[" + std::to_string(k) + "]");
+        if (r == "developer") r = "system";
+        roles.push_back(std::move(r));
+    }
 
     std::string reasoning;
     if (!opt.enable_thinking.has_value() || *opt.enable_thinking) {
