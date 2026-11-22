@@ -271,6 +271,9 @@ target_link_libraries(eval_ppl_kld PRIVATE strix_serve_model)
 add_executable(test_linear_q6 tools/test_linear_q6.cpp)
 target_link_libraries(test_linear_q6 PRIVATE strix_kernels strix_formats)
 
+add_executable(breakdown_split tools/breakdown_split.cpp)
+target_link_libraries(breakdown_split PRIVATE strix_kernels strix_formats strix_runtime)
+
 
 
 # The tutorials live in the public repo only; built when present.
