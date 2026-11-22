@@ -242,6 +242,7 @@ NgramTableFile::NgramTableFile(const std::string &path) : path_(path) {
     const std::string where = "ngram table '" + path + "'";
     fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     STRIX_CHECK(fd_ >= 0, where, ": open failed: ", std::strerror(errno));
+    ::posix_fadvise(fd_, 0, 0, POSIX_FADV_RANDOM);
     try {
         std::vector<uint8_t> h(kNgramTableHeaderBytes);
         const ssize_t got = ::pread(fd_, h.data(), h.size(), 0);

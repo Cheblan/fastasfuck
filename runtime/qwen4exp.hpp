@@ -551,11 +551,7 @@ struct Qwen4ExpSeqState {
     // corrected sample; 0: none) - forward_batch / forward_batch_verify check a run of this state starts
     // with it and clear it. Nothing advances on the state for it (see the keep_verify note in the session).
     int32_t verify_carry = 0;
-    // A batched forward's PLE n-gram rows: this state's rows gather into its own pinned staging (the session's
-    // two ping-pong buffers and the lookahead machinery are the single-run path); the gather's future is joined
-    // at the PLE layer of the forward that queued it.
-    PinnedHostBuffer ple_stage;
-    std::future<void> ple_fut;
+
     // Dedicated non-blocking stream for async device -> host snapshot exports (so exports never contend with
     // other slots on the shared compute stream_).
     hipStream_t copy_stream = nullptr;

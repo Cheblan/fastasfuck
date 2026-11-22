@@ -2559,7 +2559,6 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
         int64_t base, Tr, nL, p;  // row base in the batch buffers, rows, logits rows, the run's start position
         bool fresh;               // the run starts at position 0 (the GDN states' reset marker)
         int64_t rope0;            // the scalar-path rope base (the run's pos + its rope_delta)
-        std::future<void> ple_ready;  // multi-run: this run's PLE gather (joined at the PLE layer)
     };
     std::vector<Run> runs;
     runs.reserve(batch.size());
@@ -2574,7 +2573,7 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
                     ") exceed the capacity ", capacity_);
         STRIX_CHECK(br.n_logits >= 0 && br.n_logits <= std::min(Tr, kMaxLogits),
                     "Qwen4ExpSession::forward: n_logits = ", br.n_logits, ", expected 0..", std::min(Tr, kMaxLogits));
-        runs.push_back({br.seq, &sq, (int64_t)all_ids.size(), Tr, br.n_logits, sq.pos, sq.pos == 0, 0, {}});
+        runs.push_back({br.seq, &sq, (int64_t)all_ids.size(), Tr, br.n_logits, sq.pos, sq.pos == 0, 0});
         all_ids.insert(all_ids.end(), br.ids.begin(), br.ids.end());
         nL_total += br.n_logits;
     }
@@ -2751,27 +2750,42 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
     // (the lookahead / ping-pong buffers are the single-sequence path); the host-side gathers queue on the
     // worker, so they overlap the GPU's embedding + layer 0 like today's.
     int ple_buf = 0;
-    std::future<void> ple_ready;  // single-run: the batch's gather (the look-ahead's when it matches)
+    std::future<void> ple_ready;  // the forward's gather
     std::vector<int32_t> lookahead = std::move(ple_lookahead_);
     ple_lookahead_.clear();
     if (D.ple_layer >= 0) {
-        for (Run &r : runs) {
+        if (runs.size() > 1) {
+            // Multi-run forward: combine all runs' row IDs into one contiguous gather.
+            // Avoid killing a long prefill chunk's pending lookahead: select the free ping-pong buffer.
+            ple_buf = ple_pending_.active ? (1 - ple_pending_.buf) : 0;
+            std::vector<int64_t> all_rows;
+            all_rows.reserve((size_t)(T * 16));
+            for (Run &r : runs) {
+                Qwen4ExpSeqState &sq = *r.sq;
+                const std::vector<int32_t> &rids = batch[(size_t)(&r - runs.data())].ids;
+                std::vector<int64_t> tok(rids.begin(), rids.end()), rows((size_t)(r.Tr * 16));
+                ple_ngram_ids(m_.ngram_rows().hash_params(), tok.data(), r.Tr, sq.ple_hist, rows.data());
+                all_rows.insert(all_rows.end(), rows.begin(), rows.end());
+            }
+            ple_ready = start_ple_gather(std::move(all_rows), T, ple_host_[ple_buf], PleRun::Worker);
+        } else {
+            // Single-run forward
+            Run &r = runs[0];
             Qwen4ExpSeqState &sq = *r.sq;
-            const std::vector<int32_t> &rids = batch[(size_t)(&r - runs.data())].ids;
+            const std::vector<int32_t> &rids = batch[0].ids;
             std::vector<int64_t> tok(rids.begin(), rids.end()), rows((size_t)(r.Tr * 16));
             const PleHistory before = sq.ple_hist;  // before the advance: what a pending gather was keyed on
             ple_ngram_ids(m_.ngram_rows().hash_params(), tok.data(), r.Tr, sq.ple_hist, rows.data());
-            if (runs.size() > 1) {  // per-state gather into its own staging, joined at the PLE layer
-                if (sq.ple_stage.size() == 0)
-                    sq.ple_stage = PinnedHostBuffer((size_t)(kMaxLogits * D.ple_e) * e, "batched PLE rows");
-                r.ple_ready = start_ple_gather(std::move(rows), r.Tr, sq.ple_stage, PleRun::Worker);
-                continue;
-            }
             if (ple_pending_.active && ple_pending_.ids == rids && ple_pending_.hist.prev == before.prev) {
                 ple_buf = ple_pending_.buf, ple_ready = std::move(ple_pending_.done);
                 ple_pending_ = PleGather{};
             } else {
-                drop_ple_pending();  // a stale hint: let it finish before its buffer is reused
+                if (!lookahead.empty()) {
+                    drop_ple_pending();  // new lookahead will need the second buffer; wait for the stale pending gather
+                } else {
+                    // Solo decode without lookahead: use the free buffer, preserving any background prefill gather!
+                    ple_buf = ple_pending_.active ? (1 - ple_pending_.buf) : 0;
+                }
                 // Small forwards (decode, MTP verify): on the persistent worker, overlapping the embedding and layer 0.
                 ple_ready = start_ple_gather(std::move(rows), r.Tr, ple_host_[ple_buf],
                                              r.Tr >= kWmmaMinTokens ? PleRun::Async : PleRun::Worker);
@@ -2822,32 +2836,22 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
                 }
                 (void)rows_at, (void)stage;
             };
-            if (runs.size() == 1) {
-                join_wait(ple_ready, T, nullptr);
-                STRIX_HIP_CHECK(hipMemcpyAsync(ple_e_.get(), ple_host_[ple_buf].get(), (size_t)(T * D.ple_e) * e,
-                                               hipMemcpyHostToDevice, stream_),
-                                "uploading PLE rows");
-                // The next forward's rows (set_lookahead) into the other buffer, during this forward's GPU work: that
-                // buffer's last upload was in an earlier forward, which ended with a stream sync. The
-                // look-ahead is the single-sequence serving path (the engine's); a multi-run batch drops the hint.
-                if (!lookahead.empty()) {
-                    std::vector<int64_t> tok(lookahead.begin(), lookahead.end()), rows(lookahead.size() * 16);
-                    PleHistory h = runs[0].sq->ple_hist;
-                    ple_ngram_ids(m_.ngram_rows().hash_params(), tok.data(), (int64_t)tok.size(), h, rows.data());
-                    ple_pending_.buf = 1 - ple_buf;
-                    ple_pending_.done = start_ple_gather(std::move(rows), (int64_t)tok.size(),
-                                                         ple_host_[ple_pending_.buf], PleRun::Async);
-                    ple_pending_.ids = std::move(lookahead), ple_pending_.hist = runs[0].sq->ple_hist,
-                        ple_pending_.active = true;
-                }
-            } else {
-                for (Run &r : runs) {
-                    join_wait(r.ple_ready, r.Tr, nullptr);
-                    STRIX_HIP_CHECK(hipMemcpyAsync(ple_e_.get() + (size_t)(r.base * D.ple_e) * e,
-                                                   r.sq->ple_stage.get(), (size_t)(r.Tr * D.ple_e) * e,
-                                                   hipMemcpyHostToDevice, stream_),
-                                    "uploading batched PLE rows");
-                }
+            join_wait(ple_ready, T, nullptr);
+            STRIX_HIP_CHECK(hipMemcpyAsync(ple_e_.get(), ple_host_[ple_buf].get(), (size_t)(T * D.ple_e) * e,
+                                           hipMemcpyHostToDevice, stream_),
+                            "uploading PLE rows");
+            // The next forward's rows (set_lookahead) into the other buffer, during this forward's GPU work: that
+            // buffer's last upload was in an earlier forward, which ended with a stream sync. The
+            // look-ahead is the single-sequence serving path (the engine's); a multi-run batch drops the hint.
+            if (runs.size() == 1 && !lookahead.empty()) {
+                std::vector<int64_t> tok(lookahead.begin(), lookahead.end()), rows(lookahead.size() * 16);
+                PleHistory h = runs[0].sq->ple_hist;
+                ple_ngram_ids(m_.ngram_rows().hash_params(), tok.data(), (int64_t)tok.size(), h, rows.data());
+                ple_pending_.buf = 1 - ple_buf;
+                ple_pending_.done = start_ple_gather(std::move(rows), (int64_t)tok.size(),
+                                                     ple_host_[ple_pending_.buf], PleRun::Async);
+                ple_pending_.ids = std::move(lookahead), ple_pending_.hist = runs[0].sq->ple_hist,
+                    ple_pending_.active = true;
             }
             lin(ple_e_.get(), l.ple_kv, ple_kv_.get(), T, act);
             // The gate + conv per run: its rows out of the shared projection, its own conv state, and its own
