@@ -102,6 +102,8 @@ int run(int argc, char **argv) {
     cfg.port = (int)settings.integer("port");
     cfg.request_read_timeout_s = (int)settings.integer("request-read-timeout-s");
     cfg.model_id = settings.text("model-id");
+    cfg.model_aliases = settings.text("model-aliases");
+    cfg.api_key = settings.text("api-key");
     const int64_t slot_capacity = settings.integer("slot-capacity");
     const int64_t total_capacity = settings.integer("total-capacity");
     const int64_t total_slots = settings.integer("total-slots");

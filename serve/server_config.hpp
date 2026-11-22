@@ -26,6 +26,7 @@ struct ConfigOption {
         Path,       // a non-empty path (absolute in the file)
         PathOrOff,  // a path, or "off" for none
         Text,       // any non-empty text
+        TextOrOff,  // any text, or "off" for none
     };
     std::string name;  // the flag without "--" and the file's key
     Kind kind = Kind::Text;

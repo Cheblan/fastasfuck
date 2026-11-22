@@ -25,6 +25,8 @@ struct ServerConfig {
     std::string host = "0.0.0.0";
     int port = 5300;
     std::string model_id = "qwen3.8-flash-next";
+    std::string model_aliases;
+    std::string api_key;
     SamplingParams defaults;  // generation_config.json's
     // Thinking for requests that don't say (no enable_thinking in any spelling, no reasoning_effort, no budget): false
     // renders them without the think block (config `thinking`).

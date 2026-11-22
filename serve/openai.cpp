@@ -271,14 +271,43 @@ ChatRequest parse_chat_request(const json::Value &body, const SamplingParams &de
     // Tools.
     std::string tool_choice = "auto";
     if (const json::Value *v = field(body, "tool_choice")) {
-        if (!v->is_string() || (v->as_string("tool_choice") != "auto" && v->as_string("tool_choice") != "none"))
-            bad("tool_choice", "tool_choice " + (v->is_string() ? "'" + v->as_string("tool_choice") + "'" : std::string("(a named tool)")) +
-                                   " is not supported (no constrained decoding; 'tool_choice' must be \"auto\" or \"none\")");
-        tool_choice = v->as_string("tool_choice");
+        if (v->is_string()) {
+            const std::string tc = v->as_string("tool_choice");
+            if (tc == "auto" || tc == "none" || tc == "required") {
+                tool_choice = tc;
+            } else {
+                bad("tool_choice", "'tool_choice' string must be \"auto\", \"none\", or \"required\", got \"" + tc + "\"");
+            }
+        } else if (v->is_object()) {
+            const json::Value *fn = field(*v, "function");
+            if (!fn || !fn->is_object() || !field(*fn, "name") || !field(*fn, "name")->is_string()) {
+                bad("tool_choice", "named 'tool_choice' needs a 'function' object with a 'name' string");
+            }
+            tool_choice = field(*fn, "name")->as_string("tool_choice.function.name");
+        } else {
+            bad("tool_choice", "'tool_choice' must be a string or object");
+        }
     }
     if (const json::Value *v = field(body, "tools")) {
         check_tools(*v);
-        if (tool_choice == "auto" && !v->as_array("tools").empty()) r.tools = *v;
+        if (tool_choice == "none") {
+            // "none": model will not call any tool: tools array is omitted
+        } else if (tool_choice == "auto" || tool_choice == "required") {
+            if (!v->as_array("tools").empty()) r.tools = *v;
+        } else {
+            // Specific tool name: filter tools to only keep the selected function
+            json::Value filtered = json::Value::array();
+            for (const json::Value &t : v->as_array("tools")) {
+                const json::Value *fn = field(t, "function");
+                if (fn && fn->is_object() && field(*fn, "name") && field(*fn, "name")->as_string("") == tool_choice) {
+                    filtered.push(t);
+                }
+            }
+            if (filtered.as_array("tools").empty()) {
+                bad("tool_choice", "named tool '" + tool_choice + "' was not found in 'tools'");
+            }
+            r.tools = std::move(filtered);
+        }
     }
     // A JSON answer and tool calls exclude each other: the grammar holds the whole answer, so the model couldn't call
     // a tool - refused rather than tools silently dropped.

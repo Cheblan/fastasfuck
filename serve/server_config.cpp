@@ -43,6 +43,7 @@ const char *placeholder(ConfigOption::Kind k) {
     case ConfigOption::Kind::Path: return "PATH";
     case ConfigOption::Kind::PathOrOff: return "PATH|off";
     case ConfigOption::Kind::Text: return "TEXT";
+    case ConfigOption::Kind::TextOrOff: return "TEXT|off";
     }
     return "?";
 }
@@ -92,8 +93,9 @@ void ServerSettings::validate(size_t i, const std::string &value, const std::str
     case ConfigOption::Kind::Path:
     case ConfigOption::Kind::PathOrOff:
     case ConfigOption::Kind::Text:
+    case ConfigOption::Kind::TextOrOff:
         STRIX_CHECK(!value.empty(), what, " is empty; expected ",
-                    o.kind == ConfigOption::Kind::Text ? "text" : o.kind == ConfigOption::Kind::Path ? "a path" : "a path or off");
+                    (o.kind == ConfigOption::Kind::Text || o.kind == ConfigOption::Kind::TextOrOff) ? "text" : o.kind == ConfigOption::Kind::Path ? "a path" : "a path or off");
         break;
     }
 }
@@ -197,9 +199,9 @@ const std::string &ServerSettings::text(const std::string &name) const {
     static const std::string none;
     const size_t i = index(name, "text");
     const ConfigOption::Kind k = options_[i].kind;
-    STRIX_CHECK(k == ConfigOption::Kind::Path || k == ConfigOption::Kind::PathOrOff || k == ConfigOption::Kind::Text,
+    STRIX_CHECK(k == ConfigOption::Kind::Path || k == ConfigOption::Kind::PathOrOff || k == ConfigOption::Kind::Text || k == ConfigOption::Kind::TextOrOff,
                 "ServerSettings::text: '", name, "' isn't a path or text option");
-    if (k == ConfigOption::Kind::PathOrOff && settings_[i].value == "off") return none;
+    if ((k == ConfigOption::Kind::PathOrOff || k == ConfigOption::Kind::TextOrOff) && settings_[i].value == "off") return none;
     return settings_[i].value;
 }
 
@@ -289,6 +291,8 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
          "prefill chunk in tokens while another slot is decoding (several slots): a slot's chunk holds the GPU, so the "
          "other slots' decode steps run only between chunks; 0 = always the full chunk"},
         {"model-id", K::Text, 0, 0, server.model_id, "the model name the API reports"},
+        {"model-aliases", K::TextOrOff, 0, 0, "off", "comma-separated model aliases for /v1/models (off = none)"},
+        {"api-key", K::TextOrOff, 0, 0, "off", "optional bearer API key for authorization (off = open without auth)"},
         {"prompt-cache", K::OnOff, 0, 0, "on", "prompt cache: on or off (off disables RAM/disk cache without purging disk files)"},
         {"prompt-cache-dir", K::Path, 0, 0, models_dir + "/prompt-cache", "the disk prompt cache's directory"},
         {"prompt-cache-gib", K::Int, 0, 1 << 16, "128", "the disk prompt cache's cap in GiB; 0 = no prompt cache"},

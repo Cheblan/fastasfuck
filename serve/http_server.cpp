@@ -14,6 +14,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <sstream>
 
 namespace strix {
 
@@ -174,6 +175,43 @@ HttpServer::HttpServer(Engine &engine, const Tokenizer &tok, ServerConfig cfg)
     // The default 5 s is httplib's, sized for local APIs: a multi-MB history over a weak Wi-Fi uplink can pause
     // longer than that mid-body (strixite #15).
     svr_->set_read_timeout(cfg_.request_read_timeout_s, 0);
+
+    // Standard CORS headers on all responses
+    svr_->set_default_headers({
+        {"Access-Control-Allow-Origin", "*"},
+        {"Access-Control-Allow-Methods", "GET, POST, OPTIONS"},
+        {"Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version, openai-beta, *"},
+        {"Access-Control-Max-Age", "86400"},
+    });
+
+    // Handle OPTIONS preflight requests globally (204 No Content)
+    svr_->Options(".*", [](const httplib::Request &, httplib::Response &res) {
+        res.status = 204;
+    });
+
+    // Optional API Key authentication (CORS OPTIONS, /health and /metrics always bypass)
+    if (!cfg_.api_key.empty()) {
+        svr_->set_pre_routing_handler([this](const httplib::Request &req, httplib::Response &res) {
+            if (req.method == "OPTIONS" || req.path == "/health" || req.path == "/metrics") {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            std::string auth = req.get_header_value("Authorization");
+            std::string x_key = req.get_header_value("x-api-key");
+            std::string token;
+            if (auth.rfind("Bearer ", 0) == 0) {
+                token = auth.substr(7);
+            } else if (!x_key.empty()) {
+                token = x_key;
+            }
+            if (token != cfg_.api_key) {
+                res.status = 401;
+                res.set_content(error_body("Incorrect API key provided.", "invalid_request_error", ""), "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
+    }
+
     routes();
 }
 
@@ -617,18 +655,46 @@ void HttpServer::routes() {
     });
 
     svr_->Get("/v1/models", [this](const httplib::Request &, httplib::Response &res) {
-        json::Value m = json::Value::object();
-        m.set("id", json::Value::string(cfg_.model_id));
-        m.set("object", json::Value::string("model"));
-        m.set("created", json::Value::integer(started_));
-        m.set("owned_by", json::Value::string("strix-infer"));
-        m.set("context_length", json::Value::integer(engine_.capacity()));
         json::Value data = json::Value::array();
-        data.push(std::move(m));
+        auto add_model = [&](const std::string &id) {
+            json::Value m = json::Value::object();
+            m.set("id", json::Value::string(id));
+            m.set("object", json::Value::string("model"));
+            m.set("created", json::Value::integer(started_));
+            m.set("owned_by", json::Value::string("strixite"));
+            m.set("context_length", json::Value::integer(engine_.capacity()));
+            data.push(std::move(m));
+        };
+        add_model(cfg_.model_id);
+        if (!cfg_.model_aliases.empty()) {
+            std::stringstream ss(cfg_.model_aliases);
+            std::string item;
+            while (std::getline(ss, item, ',')) {
+                size_t start = item.find_first_not_of(" \t\r\n");
+                size_t end = item.find_last_not_of(" \t\r\n");
+                if (start != std::string::npos && end != std::string::npos) {
+                    std::string alias = item.substr(start, end - start + 1);
+                    if (!alias.empty() && alias != cfg_.model_id) {
+                        add_model(alias);
+                    }
+                }
+            }
+        }
         json::Value b = json::Value::object();
         b.set("object", json::Value::string("list"));
         b.set("data", std::move(data));
         res.set_content(b.dump(), "application/json");
+    });
+
+    svr_->Get(R"(/v1/models/([^/]+))", [this](const httplib::Request &req, httplib::Response &res) {
+        const std::string model_id = req.matches[1];
+        json::Value m = json::Value::object();
+        m.set("id", json::Value::string(model_id));
+        m.set("object", json::Value::string("model"));
+        m.set("created", json::Value::integer(started_));
+        m.set("owned_by", json::Value::string("strixite"));
+        m.set("context_length", json::Value::integer(engine_.capacity()));
+        res.set_content(m.dump(), "application/json");
     });
 
     svr_->Get("/health", [this](const httplib::Request &, httplib::Response &res) {
