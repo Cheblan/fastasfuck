@@ -460,6 +460,7 @@ struct GenerationRequest {
     // logit_bias (OpenAI): added to every logits row the request samples from (serve/sampler.hpp, LogitBias), thinking
     // and answer alike; null = none. Ids below the tokenizer's size (submit checks).
     std::shared_ptr<const LogitBias> logit_bias;
+    bool capture_tokens = false;  // capture sl.seq into res.tokens
     int64_t id = 0;       // the HTTP layer's request id, for log lines ("Request <id>"); 0 = none given
     bool stream = false;  // for the log only (the HTTP layer streams or not)
     // The HTTP layer's rows for the top of the request's log block (label, text; an empty label goes on the row
@@ -491,7 +492,8 @@ constexpr const char *kErrorKvBudget = "kv_budget_exhausted";
 
 struct GenerationResult {
     std::string finish_reason;  // stop | length | tool_calls | cancelled | error
-    std::string error;          // finish_reason == error
+    std::string error;
+    std::vector<int32_t> tokens;  // captured tokens if req.capture_tokens is true          // finish_reason == error
     std::string error_type;     // finish_reason == error: empty (a server error, HTTP 500) or kErrorKvBudget (503)
     int64_t prompt_tokens = 0, cached_tokens = 0, completion_tokens = 0, reasoning_tokens = 0;
     int64_t mtp_drafted_tokens = 0, mtp_accepted_tokens = 0, mtp_rollbacks = 0;

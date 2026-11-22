@@ -77,6 +77,58 @@ constexpr int kExitGpuFatal = 3;
 // RestartPreventExitStatus - a restart would load the weights again only to refuse again.
 constexpr int kExitLowMemory = 4;
 
+
+void run_system_preflight_checks() {
+    uint64_t vram_total = 0;
+    uint64_t gtt_total = 0;
+    try {
+        for (int c = 0; c < 4; ++c) {
+            std::string p = "/sys/class/drm/card" + std::to_string(c) + "/device/";
+            std::ifstream fv(p + "mem_info_vram_total");
+            if (fv.is_open()) { fv >> vram_total; }
+            std::ifstream fg(p + "mem_info_gtt_total");
+            if (fg.is_open()) { fg >> gtt_total; }
+            if (vram_total > 0 || gtt_total > 0) break;
+        }
+    } catch (...) {}
+
+    const double vram_gib = (double)vram_total / (1ull << 30);
+    const double gtt_gib = (double)gtt_total / (1ull << 30);
+    if (vram_total > 0 || gtt_total > 0) {
+        slog(LogLevel::Info, "preflight: detected GPU memory headroom: VRAM %.1f GiB, GTT %.1f GiB (total visible %.1f GiB)",
+             vram_gib, gtt_gib, vram_gib + gtt_gib);
+        if ((vram_gib + gtt_gib) < 68.0) {
+            slog(LogLevel::Warning, "preflight: WARNING: Total GPU addressable space (%.1f GiB) is under 68 GiB! Weights (~65.9 GiB) + KV cache will exceed available headroom. Recommended: configure BIOS UMA Frame Buffer to 96GB OR boot kernel with amdgpu.gttsize=122880.", vram_gib + gtt_gib);
+        }
+    }
+
+    try {
+        std::ifstream fthp("/sys/kernel/mm/transparent_hugepage/enabled");
+        if (fthp.is_open()) {
+            std::string line;
+            std::getline(fthp, line);
+            if (line.find("[always]") != std::string::npos) {
+                slog(LogLevel::Warning, "preflight: NOTICE: Transparent Huge Pages is [always]. Under heavy multi-agent concurrency, background khugepaged compaction causes memory bus stalls and ROCm SVM page faults. Recommended: 'echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled'");
+            }
+        }
+    } catch (...) {}
+
+    try {
+        std::ifstream fmem("/proc/meminfo");
+        if (fmem.is_open()) {
+            std::string key;
+            uint64_t val;
+            std::string unit;
+            while (fmem >> key >> val >> unit) {
+                if (key == "SwapTotal:" && val > 0) {
+                    slog(LogLevel::Warning, "preflight: NOTICE: Swap is active (%llu MiB). On AMD Strix Halo unified memory architecture, direct page reclaim to swap starves GPU memory controllers. Recommended: 'sudo swapoff -a'", (unsigned long long)(val / 1024));
+                    break;
+                }
+            }
+        }
+    } catch (...) {}
+}
+
 int run(int argc, char **argv) {
     ServerSettings settings(strix_server_options(models_dir()));
     settings.load(std::vector<std::string>(argv + 1, argv + argc));
@@ -89,6 +141,7 @@ int run(int argc, char **argv) {
         return 0;
     }
     set_log_level(parse_log_level(settings.text("log-level")));  // first: every line below is filtered by it
+    run_system_preflight_checks();
     slog(LogLevel::Info, "startup: config file %s",
          settings.config_path().empty() ? "none (defaults and flags only)" : settings.config_path().c_str());
     for (const ConfigOption &o : settings.options()) {

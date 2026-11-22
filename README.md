@@ -171,11 +171,18 @@ curl -s localhost:5300/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Point any OpenAI-compatible client at `http://<your-machine>:5300/v1`, model `qwen3.8-flash-next`.
+Point any OpenAI-compatible client at `http://<your-machine>:5300/v1`, model `qwen3.8-flash-next` (aliases like `gpt-4o`, `o1` are supported via `model-aliases`).
 
-> [!IMPORTANT]
-> The server has no authentication and listens on all interfaces (`host = 0.0.0.0` in `deploy/strix-server.conf`).
-> Run it on a trusted network, or set `host = 127.0.0.1`.
+### OpenAI Responses API (HTTP & WebSocket)
+strixite natively supports the OpenAI Responses API (`/v1/responses`) over both HTTP (JSON/SSE) and WebSocket for low-latency coding agents like **Codex CLI** and **OpenCode 2**:
+- **Incremental state with `previous_response_id`**: upload history only once. Subsequent turns send only new deltas (~10–20 tokens), reusing 100% of the live session KV cache on the GPU without redundant tokenization or prefill.
+- **WebSocket Route (`ws://localhost:5300/v1/responses`)**: maintains an active multi-turn connection, streaming granular token events (`response.output_text.delta`, `response.reasoning_text.delta`, `response.function_call_arguments.delta`) and handling cancellation (`response.cancel`).
+- **Reasoning Control**: control think blocks dynamically with `reasoning: {"effort": "none" | "low" | "medium" | "high"}`.
+- **Flat & Nested Tool Calls**: natively handles flat and nested tool schemas with seamless `function_call_output` chaining.
+
+### Authentication & CORS
+- **API Key**: protect your endpoint with `api-key = "your-secret"` in config or `--api-key`. Bypasses `/health`, `/metrics`, and CORS preflight.
+- **CORS**: automatic permissive headers on all endpoints with instant `OPTIONS .* -> 204 No Content` for browser-based frontends.
 
 Every setting, with the reason behind its value, is in `deploy/strix-server.conf`; `strix_server --help` lists them
 all. `deploy/strix-server.service` runs it as a systemd user unit (adjust the paths to your checkout).

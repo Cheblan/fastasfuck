@@ -184,12 +184,12 @@ template <typename R> void parse_common(const json::Value &body, R &r, bool lega
 
 }  // namespace
 
-std::string error_body(const std::string &message, const std::string &type, const std::string &param) {
+std::string error_body(const std::string &message, const std::string &type, const std::string &param, const std::string &code) {
     json::Value e = json::Value::object();
     e.set("message", json::Value::string(message));
     e.set("type", json::Value::string(type));
     e.set("param", param.empty() ? json::Value() : json::Value::string(param));
-    e.set("code", json::Value());
+    e.set("code", code.empty() ? json::Value() : json::Value::string(code));
     json::Value b = json::Value::object();
     b.set("error", std::move(e));
     return b.dump();

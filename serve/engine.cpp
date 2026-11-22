@@ -1009,6 +1009,9 @@ void Engine::run(Job &job, Slot &sl) {
         }
         finished = true;
         res.finish_reason = reason;
+        if (req.capture_tokens) {
+            res.tokens = sl.seq;
+        }
         res.total_ms = (now_s() - job.enqueued) * 1e3;
         const BackendStats b = sl.be->backend_stats();
         res.backend.ngram_rows_requested = b.ngram_rows_requested - b0.ngram_rows_requested;

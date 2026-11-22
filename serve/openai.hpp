@@ -20,11 +20,11 @@ namespace strix {
 // An error the client caused: HTTP status + OpenAI error body.
 struct ApiError : std::runtime_error {
     int status;
-    std::string type, param;
-    ApiError(int status, const std::string &msg, std::string param = {}, std::string type = "invalid_request_error")
-        : std::runtime_error(msg), status(status), type(std::move(type)), param(std::move(param)) {}
+    std::string type, param, code;
+    ApiError(int status, const std::string &msg, std::string param = {}, std::string type = "invalid_request_error", std::string code = {})
+        : std::runtime_error(msg), status(status), type(std::move(type)), param(std::move(param)), code(std::move(code)) {}
 };
-std::string error_body(const std::string &message, const std::string &type, const std::string &param);
+std::string error_body(const std::string &message, const std::string &type, const std::string &param, const std::string &code = {});
 
 struct ChatRequest {
     json::Value messages, tools;  // tools: null unless a non-empty array that will be rendered

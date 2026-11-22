@@ -215,6 +215,8 @@ add_library(strix_serve STATIC
     serve/think_nudge.cpp
     serve/server_config.cpp
     serve/openai.cpp
+    serve/response_store.cpp
+    serve/responses_api.cpp
     serve/http_server.cpp
     serve/memory_plan.cpp
     serve/prompt_cache.cpp

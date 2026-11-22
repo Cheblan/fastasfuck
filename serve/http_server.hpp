@@ -7,6 +7,7 @@
 // cancels its request.
 
 #include "serve/engine.hpp"
+#include "serve/response_store.hpp"
 #include "serve/grammar_cache.hpp"
 #include "serve/tokenizer.hpp"
 #include "serve/vision_request.hpp"
@@ -67,6 +68,9 @@ private:
     GrammarCache grammars_;            // compiled response formats (structured output), shared across requests
     vision::PreprocessGate vision_gate_;  // image preprocesses in flight (cfg_.vision_preprocess_limit)
     vision::DecodeMemo vision_memo_;      // grids of the images already decoded (their repeats skip the decode)
+    ResponseStore response_store_{256, 256ull << 20};
+    std::atomic<int> active_ws_conns_{0};
+    static constexpr int kMaxActiveWsConns = 16;
     std::unique_ptr<httplib::Server> svr_;
     void routes();
 };
