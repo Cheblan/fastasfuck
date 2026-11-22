@@ -77,7 +77,10 @@ static constexpr float kVerifyLatencyMs[] = {
 };
 static constexpr float kDefaultMtpDraftStepMs = 1.64f;
 
-inline float get_verify_cost(int64_t T) {
+inline float get_verify_cost(int64_t T, const MtpHardwareProfile *prof = nullptr) {
+    if (prof && prof->verify_latencies.size() > 1) {
+        return prof->get_verify_cost(T);
+    }
     if (T < 0) return 0.0f;
     constexpr size_t N = sizeof(kVerifyLatencyMs) / sizeof(kVerifyLatencyMs[0]);
     if (T < (int64_t)N) {
@@ -1492,11 +1495,11 @@ void Engine::run(Job &job, Slot &sl) {
                 const float tau_global = ema_T / std::max(1.0f, ema_E);
 
                 float P_cum = 1.0f;
-                const float draft_step_ms = sl.be ? sl.be->mtp_draft_step_ms() : kDefaultMtpDraftStepMs;
+                const float draft_step_ms = (options_.mtp_hw_profile.draft_step_ms > 0.0f) ? options_.mtp_hw_profile.draft_step_ms : (sl.be ? sl.be->mtp_draft_step_ms() : kDefaultMtpDraftStepMs);
 
                 for (int64_t step = 0; step < steps; ++step) {
                     const int64_t k_curr = step;
-                    const float delta_verify = get_verify_cost(k_curr + 2) - get_verify_cost(k_curr + 1);
+                    const float delta_verify = get_verify_cost(k_curr + 2, &options_.mtp_hw_profile) - get_verify_cost(k_curr + 1, &options_.mtp_hw_profile);
                     const float delta_T = draft_step_ms + delta_verify;
 
                     // Stage 1: Pre-draft optimistic check (Cost mode only)
@@ -1528,10 +1531,10 @@ void Engine::run(Job &job, Slot &sl) {
                     }
 
                     if (active_gate == Options::MtpGateRule::Cost) {
-                        // Stage 2: Post-draft actual cost check via empirical piecewise-linear LUT
+                        // Stage 2: Post-draft actual cost check via calibrated sigmoid model
                         const float delta_logits = t.best_v - t.second_v;
-                        const float p_lut = interpolate_mtp_prob(delta_logits);
-                        const float p_next = std::clamp(p_lut - options_.mtp_lut_step_penalty * (float)step, 0.01f, 0.995f);
+                        const float p_calib = 1.0f / (1.0f + std::exp(-(options_.mtp_alpha * delta_logits + options_.mtp_beta * (float)step + options_.mtp_bias)));
+                        const float p_next = std::clamp(p_calib, 0.01f, 0.995f);
                         const float P_cum_next = P_cum * p_next;
 
                         if (P_cum_next * tau_global <= delta_T) {
@@ -1599,7 +1602,7 @@ void Engine::run(Job &job, Slot &sl) {
 
                     // Renewal-Reward EMA update after MTP verify round:
                     const int64_t acc = j;
-                    const float round_T = get_verify_cost(k + 1) + (float)k * draft_step_ms;
+                    const float round_T = get_verify_cost(k + 1, &options_.mtp_hw_profile) + (float)k * draft_step_ms;
                     const float round_E = 1.0f + (float)acc;
                     const float decay = options_.mtp_ema_decay;
                     ema_T = (1.0f - decay) * ema_T + decay * round_T;
@@ -1683,7 +1686,7 @@ void Engine::run(Job &job, Slot &sl) {
             sl.seq.push_back(id);
             step(0, 0, 1);
             const float decay = options_.mtp_ema_decay;
-            ema_T = (1.0f - decay) * ema_T + decay * get_verify_cost(1);
+            ema_T = (1.0f - decay) * ema_T + decay * get_verify_cost(1, &options_.mtp_hw_profile);
             ema_E = (1.0f - decay) * ema_E + decay * 1.0f;
         }
         decoding.end();
