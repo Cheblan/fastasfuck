@@ -817,6 +817,7 @@ Qwen4ExpSeqState::Qwen4ExpSeqState(const Qwen4ExpModel &model, int64_t capacity,
         STRIX_HIP_CHECK(hipEventCreateWithFlags(&ws.verify_done_event, hipEventDisableTiming), "MTP draft verify_done_event");
     }
     STRIX_HIP_CHECK(hipStreamCreateWithFlags(&copy_stream, hipStreamNonBlocking), "Qwen4ExpSeqState: copy stream");
+    STRIX_HIP_CHECK(hipEventCreateWithFlags(&copy_event, hipEventDisableTiming), "Qwen4ExpSeqState: copy event");
 }
 
 Qwen4ExpSeqState::~Qwen4ExpSeqState() {
@@ -828,6 +829,10 @@ Qwen4ExpSeqState::~Qwen4ExpSeqState() {
     if (mtp_ws.verify_done_event) {
         (void)hipEventDestroy(mtp_ws.verify_done_event);
         mtp_ws.verify_done_event = nullptr;
+    }
+    if (copy_event) {
+        (void)hipEventDestroy(copy_event);
+        copy_event = nullptr;
     }
     if (copy_stream) {
         (void)hipStreamSynchronize(copy_stream);
@@ -1949,6 +1954,8 @@ void Qwen4ExpSession::export_state(int seq, const Qwen4ExpSnapshot &s, uint8_t *
     // sequence. The zeroing waits for the copies.
     const size_t tail_valid = (size_t)((n % kernels::kQsaBlock) * D.idx_d) * e;
     std::vector<std::pair<uint8_t *, size_t>> tail_unused;
+    STRIX_HIP_CHECK(hipEventRecord(sq.copy_event, stream_), "Qwen4ExpSession::export_state: record copy_event");
+    STRIX_HIP_CHECK(hipStreamWaitEvent(sq.copy_stream, sq.copy_event, 0), "Qwen4ExpSession::export_state: wait copy_event");
     try {
         for (size_t l = 0; l < sq.conv_state.size(); ++l) {
             if (D.is_attention[l]) {
@@ -2027,6 +2034,8 @@ void Qwen4ExpSession::export_small_state(int seq, const Qwen4ExpSnapshot &s, uin
     cur += sizeof(PleHistory);
     const size_t tail_valid = (size_t)((n % kernels::kQsaBlock) * D.idx_d) * e;
     std::vector<std::pair<uint8_t *, size_t>> tail_unused;
+    STRIX_HIP_CHECK(hipEventRecord(sq.copy_event, stream_), "Qwen4ExpSession::export_small_state: record copy_event");
+    STRIX_HIP_CHECK(hipStreamWaitEvent(sq.copy_stream, sq.copy_event, 0), "Qwen4ExpSession::export_small_state: wait copy_event");
     // A drift between state_paged_ranges and this walk must name itself, never run off the buffer (the stitch
     // test is what catches it in practice; these checks are the seat belt).
     const auto room = [&](size_t b) {
@@ -3205,11 +3214,13 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
         // of one state: run_mtp swaps mtp_x_ against that state's chain buffer mid-draft.
         for (Run &r : runs) mtp_input(r.base, r.Tr, r.sq->mtp_prev.get());
         hc_mix(ml.hc_attn, true, false, mtp_x_.get());
-        constexpr int64_t mtp_qkv_stride = 1664;
-        constexpr int64_t mtp_row0 = 12288;
-        constexpr int64_t mtp_k_offset = 0;
+        const int64_t mtp_row0 = D.hq * 2 * hd;
+        const int64_t mtp_qkv_stride = D.astride - mtp_row0;
+        const int64_t mtp_k_offset = 0;
         const int64_t mtp_v_offset = D.hkv * hd;
-        constexpr int64_t mtp_idx_k_offset = 1536;
+        const int64_t mtp_idx_k_offset = (D.idx_col + D.idx_h * D.idx_d) - mtp_row0;
+        STRIX_CHECK(mtp_row0 > 0 && mtp_qkv_stride > 0 && mtp_idx_k_offset >= 0, "MTP catch-up offsets invalid");
+        STRIX_CHECK(mtp_row0 + mtp_qkv_stride == D.astride, "MTP qkv slice bounds mismatch");
         lin(u_.get(), slice_rows(ml.qkv, mtp_row0, mtp_qkv_stride), proj_.get(), T, act);
         for (Run &r : runs) {
             Qwen4ExpSeqState &sq = *r.sq;
@@ -3483,8 +3494,10 @@ void Qwen4ExpSession::keep_verify_prefix_seq(Qwen4ExpSeqState &sq, int64_t rows)
         // single-sequence verify, the run's row base for a batched one); its streams are still in x_.
         const Qwen4ExpModel::Layer &ml = m_.mtp().layer;
         const int64_t rbase = sq.verify_row_base;
-        constexpr int64_t mtp_qkv_stride = 1664;
-        constexpr int64_t mtp_idx_k_offset = 1536;
+        const int64_t mtp_row0 = D.hq * 2 * D.hd;
+        const int64_t mtp_qkv_stride = D.astride - mtp_row0;
+        const int64_t mtp_idx_k_offset = (D.idx_col + D.idx_h * D.idx_d) - mtp_row0;
+        STRIX_CHECK(mtp_row0 > 0 && mtp_qkv_stride > 0 && mtp_idx_k_offset >= 0, "MTP keep_verify_prefix offsets invalid");
         kernels::qsa_block_keys(proj_.get() + (size_t)(rbase * mtp_qkv_stride + mtp_idx_k_offset) * e,
                                 mtp_qkv_stride, rows, p0,
                                 p0 % kernels::kQsaBlock ? sq.tail_mtp[sq.verify_mtp_tail_cur].get() : nullptr,

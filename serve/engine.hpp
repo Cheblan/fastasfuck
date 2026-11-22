@@ -644,32 +644,62 @@ public:
     int64_t capacity() const { return capacity_; }
     const LmBackend &backend() const { return be_; }
     const PromptCache *prompt_cache() const { return cache_; }
-    float mtp_margin() const { return options_.mtp_margin; }
-    int64_t mtp_draft() const { return options_.mtp_draft; }
-    bool mtp_escalating_margin() const { return options_.mtp_escalating_margin; }
-    float mtp_margin_slope() const { return options_.mtp_margin_slope; }
-    Options::MtpGateRule mtp_gate_rule() const { return options_.mtp_gate_rule; }
-    std::string mtp_gate_rule_str() const { return options_.mtp_gate_rule_str(); }
-    Options::MtpGateRule sampled_gate() const { return options_.sampled_gate; }
-    std::string sampled_gate_str() const { return options_.sampled_gate_str(); }
-    float mtp_lut_step_penalty() const { return options_.mtp_lut_step_penalty; }
-    float mtp_ema_decay() const { return options_.mtp_ema_decay; }
-    void set_mtp_margin(float m) { options_.mtp_margin = m; }
-    void set_mtp_draft(int64_t d) { options_.mtp_draft = d; }
-    void set_mtp_escalating_margin(bool m) { options_.mtp_escalating_margin = m; }
-    void set_mtp_margin_slope(float s) { options_.mtp_margin_slope = s; }
-    void set_mtp_gate_rule(const std::string &r) { options_.set_mtp_gate_rule(r); }
-    void set_sampled_gate(const std::string &r) { options_.set_sampled_gate(r); }
-    void set_mtp_lut_step_penalty(float p) { options_.mtp_lut_step_penalty = p; }
-    void set_mtp_ema_decay(float d) { options_.mtp_ema_decay = d; }
-    float mtp_alpha() const { return options_.mtp_alpha; }
-    float mtp_beta() const { return options_.mtp_beta; }
-    float mtp_bias() const { return options_.mtp_bias; }
-    const MtpHardwareProfile &mtp_hw_profile() const { return options_.mtp_hw_profile; }
-    void set_mtp_alpha(float a) { options_.mtp_alpha = a; }
-    void set_mtp_beta(float b) { options_.mtp_beta = b; }
-    void set_mtp_bias(float b) { options_.mtp_bias = b; }
-    void set_mtp_hw_profile(const MtpHardwareProfile &p) { options_.mtp_hw_profile = p; }
+    struct MtpRuntimeConfig {
+        Options::MtpGateRule gate_rule = Options::MtpGateRule::Cost;
+        int64_t draft = 3;
+        float margin = 2.5f;
+        bool escalating_margin = false;
+        float margin_slope = 0.08f;
+        float lut_step_penalty = 0.05f;
+        float ema_decay = 0.05f;
+        float alpha = 0.85f;
+        float beta = 0.0f;
+        float bias = 0.0f;
+        MtpHardwareProfile hw_profile;
+    };
+    MtpRuntimeConfig get_mtp_config(bool is_greedy) const {
+        std::lock_guard<std::mutex> lk(mtp_mu_);
+        MtpRuntimeConfig cfg;
+        cfg.gate_rule = is_greedy ? options_.mtp_gate_rule : options_.sampled_gate;
+        cfg.draft = options_.mtp_draft;
+        cfg.margin = options_.mtp_margin;
+        cfg.escalating_margin = options_.mtp_escalating_margin;
+        cfg.margin_slope = options_.mtp_margin_slope;
+        cfg.lut_step_penalty = options_.mtp_lut_step_penalty;
+        cfg.ema_decay = options_.mtp_ema_decay;
+        cfg.alpha = options_.mtp_alpha;
+        cfg.beta = options_.mtp_beta;
+        cfg.bias = options_.mtp_bias;
+        cfg.hw_profile = options_.mtp_hw_profile;
+        return cfg;
+    }
+
+    float mtp_margin() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_margin; }
+    int64_t mtp_draft() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_draft; }
+    bool mtp_escalating_margin() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_escalating_margin; }
+    float mtp_margin_slope() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_margin_slope; }
+    Options::MtpGateRule mtp_gate_rule() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_gate_rule; }
+    std::string mtp_gate_rule_str() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_gate_rule_str(); }
+    Options::MtpGateRule sampled_gate() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.sampled_gate; }
+    std::string sampled_gate_str() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.sampled_gate_str(); }
+    float mtp_lut_step_penalty() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_lut_step_penalty; }
+    float mtp_ema_decay() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_ema_decay; }
+    void set_mtp_margin(float m) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_margin = m; }
+    void set_mtp_draft(int64_t d) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_draft = d; }
+    void set_mtp_escalating_margin(bool m) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_escalating_margin = m; }
+    void set_mtp_margin_slope(float s) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_margin_slope = s; }
+    void set_mtp_gate_rule(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_mtp_gate_rule(r); }
+    void set_sampled_gate(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_sampled_gate(r); }
+    void set_mtp_lut_step_penalty(float p) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_lut_step_penalty = p; }
+    void set_mtp_ema_decay(float d) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_ema_decay = d; }
+    float mtp_alpha() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_alpha; }
+    float mtp_beta() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_beta; }
+    float mtp_bias() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_bias; }
+    MtpHardwareProfile mtp_hw_profile() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_hw_profile; }
+    void set_mtp_alpha(float a) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_alpha = a; }
+    void set_mtp_beta(float b) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_beta = b; }
+    void set_mtp_bias(float b) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_bias = b; }
+    void set_mtp_hw_profile(const MtpHardwareProfile &p) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_hw_profile = p; }
 
     struct HwLatencyReport {
         double verify_ms[16]{};
@@ -772,6 +802,7 @@ private:
     std::unique_ptr<GpuArbiter> arbiter_;  // several slots only
     std::vector<std::unique_ptr<Slot>> slots_;
     mutable std::mutex mu_;
+    mutable std::mutex mtp_mu_;
     std::condition_variable cv_;
     std::deque<Job> queue_;
     bool stop_ = false;

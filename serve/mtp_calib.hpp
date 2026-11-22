@@ -59,6 +59,7 @@ struct MtpCalibratedProfile {
     uint64_t weights_strix_hash = 0;
     uint64_t weights_size = 0;
     int64_t weights_mtime = 0;
+    int draft_head_bits = 4;
     bool draft_head_q4 = true;
     std::string mtp_vocab_filter = "all";
     std::string gdn_precision = "half-u";
@@ -74,7 +75,7 @@ std::vector<float> filter_iqr_outliers(const std::vector<float>& values, float k
 std::string compute_weights_fingerprint(
     const std::string& weights_path,
     const std::string& model_id,
-    bool draft_head_q4,
+    int draft_head_bits,
     const std::string& mtp_vocab_filter,
     const std::string& gdn_precision,
     uint64_t* out_strix_hash = nullptr,

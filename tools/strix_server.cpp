@@ -392,8 +392,9 @@ int run(int argc, char **argv) {
     if (use_mtp && settings.on("mtp-calib")) {
         uint64_t strix_h = 0, fsize = 0;
         int64_t fmtime = 0;
+        const int draft_head_bits = (model.draft_head().bits > 0) ? model.draft_head().bits : model.lm_head().bits;
         const std::string fp = compute_weights_fingerprint(
-            weights, cfg.model_id, draft_head_q4,
+            weights, cfg.model_id, draft_head_bits,
             settings.text("mtp-vocab-filter"), settings.text("gdn-precision"),
             &strix_h, &fsize, &fmtime
         );
@@ -417,8 +418,55 @@ int run(int argc, char **argv) {
             eff_beta = cached_prof->acceptance.beta;
             eff_bias = cached_prof->acceptance.bias;
         } else {
-            slog(LogLevel::Info, "startup: [MTP_CALIB] profile %s not in cache; recording baseline to %s",
-                 fp.substr(0, 12).c_str(), cache_path.c_str());
+            slog(LogLevel::Info, "startup: [MTP_CALIB] profile %s not in cache; running live hardware calibration...",
+                 fp.substr(0, 12).c_str());
+            try {
+                // 1. Warmup ping to ensure all kernels and allocators are initialized
+                backend.forward_rows({100}, 1, false, 0);
+
+                // 2. Calibrate draft_step_ms: measure forward_mtp_top2
+                std::vector<float> draft_times;
+                for (int t = 0; t < 2; ++t) backend.forward_mtp_top2(100, 0); // warmup
+                for (int t = 0; t < 5; ++t) {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    backend.forward_mtp_top2(100, 0);
+                    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                    draft_times.push_back((float)ms);
+                }
+                const float meas_draft_ms = compute_median(draft_times);
+                if (meas_draft_ms > 0.1f && meas_draft_ms < 50.0f) {
+                    hw_prof.draft_step_ms = meas_draft_ms;
+                }
+
+                // 3. Calibrate verify latencies for T = 1..8
+                std::vector<float> verify_grid = {0.0f};
+                for (int k = 1; k <= 8; ++k) {
+                    std::vector<int32_t> test_ids(k, 100);
+                    std::vector<float> k_times;
+                    for (int t = 0; t < 3; ++t) {
+                        const auto t0 = std::chrono::steady_clock::now();
+                        backend.forward_verify(test_ids, 1);
+                        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                        backend.drop_verify();
+                        k_times.push_back((float)ms);
+                    }
+                    verify_grid.push_back(compute_median(k_times));
+                }
+                backend.reset();
+
+                if (verify_grid.size() >= 9 && verify_grid[1] > 1.0f) {
+                    hw_prof.verify_latencies = verify_grid;
+                    hw_prof.verify_base_ms = verify_grid[1];
+                    hw_prof.verify_step_ms = std::max(0.1f, (verify_grid[8] - verify_grid[1]) / 7.0f);
+                }
+
+                slog(LogLevel::Info, "startup: [MTP_CALIB] live calibration done: draft=%.2f ms, verify[1]=%.2f ms, verify[8]=%.2f ms, step=%.2f ms",
+                     hw_prof.draft_step_ms, hw_prof.verify_base_ms, hw_prof.verify_latencies.back(), hw_prof.verify_step_ms);
+            } catch (const std::exception &ex) {
+                slog(LogLevel::Warning, "startup: [MTP_CALIB] live calibration failed (%s); using baseline", ex.what());
+                backend.reset();
+            }
+
             if (settings.on("mtp-calib-cache")) {
                 MtpCalibratedProfile p_save;
                 p_save.fingerprint = fp;
@@ -427,7 +475,8 @@ int run(int argc, char **argv) {
                 p_save.weights_strix_hash = strix_h;
                 p_save.weights_size = fsize;
                 p_save.weights_mtime = fmtime;
-                p_save.draft_head_q4 = draft_head_q4;
+                p_save.draft_head_bits = draft_head_bits;
+                p_save.draft_head_q4 = (draft_head_bits == 4);
                 p_save.mtp_vocab_filter = settings.text("mtp-vocab-filter");
                 p_save.gdn_precision = settings.text("gdn-precision");
                 p_save.hw = hw_prof;
@@ -436,6 +485,7 @@ int run(int argc, char **argv) {
                 p_save.acceptance.bias = eff_bias;
                 p_save.acceptance.sample_count = (int)settings.integer("mtp-calib-triplets");
                 save_cached_profile(cache_path, p_save);
+                slog(LogLevel::Info, "startup: [MTP_CALIB] saved calibrated profile to %s", cache_path.c_str());
             }
         }
     }

@@ -558,6 +558,7 @@ struct Qwen4ExpSeqState {
     // Dedicated non-blocking stream for async device -> host snapshot exports (so exports never contend with
     // other slots on the shared compute stream_).
     hipStream_t copy_stream = nullptr;
+    hipEvent_t copy_event = nullptr;
 
     int64_t pos3Hend() const { return pos3_start + (int64_t)pos3_host.size() / 3; }  // == pos when non-empty
 
@@ -662,7 +663,10 @@ public:
     bool batchable(int seq) const {
         STRIX_CHECK(seq >= 0 && seq < n_slots(), "Qwen4ExpSession::batchable: seq ", seq, ", expected 0..", n_slots() - 1);
         const Qwen4ExpSeqState &s = *seqs_[(size_t)seq];
-        return s.pending3.empty();
+        if (!s.pending3.empty()) return false;
+        // Do not allow an interleaved slot into multi-run batch until its trailing QSA block is closed
+        if (s.history_ever_interleaved && (s.pos % 4 != 0)) return false;
+        return true;
     }
     // The rope angle position of sequence position seq on the scalar path (seq + rope_delta). Sequence-index
     // uses (cache rows, QSA block counts, dense-limit checks) stay seq - only rope angles use this.

@@ -60,7 +60,7 @@ std::vector<float> filter_iqr_outliers(const std::vector<float>& values, float k
 std::string compute_weights_fingerprint(
     const std::string& weights_path,
     const std::string& model_id,
-    bool draft_head_q4,
+    int draft_head_bits,
     const std::string& mtp_vocab_filter,
     const std::string& gdn_precision,
     uint64_t* out_strix_hash,
@@ -81,7 +81,7 @@ std::string compute_weights_fingerprint(
     if (fd >= 0) {
         uint8_t hdr[128];
         ssize_t rd = ::read(fd, hdr, sizeof(hdr));
-        if (rd == 128 && std::memcmp(hdr, "STRIXW\0\0", 8) == 0) {
+        if (rd == 128 && std::memcmp(hdr, "STRIXWT\0", 8) == 0) {
             std::memcpy(&header_index_hash, hdr + 48, sizeof(uint64_t));
         }
         ::close(fd);
@@ -97,7 +97,7 @@ std::string compute_weights_fingerprint(
        << "0x" << std::hex << header_index_hash << "|"
        << file_size << "|"
        << mtime_ns << "|"
-       << (draft_head_q4 ? "q4" : "q8") << "|"
+       << "q" << draft_head_bits << "|"
        << mtp_vocab_filter << "|"
        << gdn_precision;
 
@@ -243,6 +243,21 @@ std::optional<MtpCalibratedProfile> load_cached_profile(
             if (v_cnt) res.acceptance.sample_count = static_cast<int>(v_cnt->as_int("triplets_count"));
         }
 
+        const json::Value *meta = prof->find("metadata");
+        if (meta && meta->is_object()) {
+            const json::Value *v_bits = meta->find("draft_head_bits");
+            if (v_bits) {
+                res.draft_head_bits = static_cast<int>(v_bits->as_int("draft_head_bits"));
+                res.draft_head_q4 = (res.draft_head_bits == 4);
+            } else {
+                const json::Value *v_q4 = meta->find("draft_head_q4");
+                if (v_q4) {
+                    res.draft_head_q4 = v_q4->as_bool("draft_head_q4");
+                    res.draft_head_bits = res.draft_head_q4 ? 4 : 8;
+                }
+            }
+        }
+
         return res;
     } catch (...) {
         return std::nullopt;
@@ -276,6 +291,7 @@ bool save_cached_profile(
     meta.set("weights_strix_hash", json::Value::integer(profile.weights_strix_hash));
     meta.set("weights_size", json::Value::integer(profile.weights_size));
     meta.set("weights_mtime", json::Value::integer(profile.weights_mtime));
+    meta.set("draft_head_bits", json::Value::integer(profile.draft_head_bits));
     meta.set("draft_head_q4", json::Value::boolean(profile.draft_head_q4));
     meta.set("mtp_vocab_filter", json::Value::string(profile.mtp_vocab_filter));
     meta.set("gdn_precision", json::Value::string(profile.gdn_precision));
@@ -305,7 +321,7 @@ bool save_cached_profile(
 
     std::ofstream out(cache_file);
     if (!out.is_open()) return false;
-    out << root.dump_python();
+    out << root.dump();
     return true;
 }
 

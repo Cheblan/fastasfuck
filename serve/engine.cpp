@@ -990,7 +990,8 @@ void log_footer(const GenerationResult &r) {
 void Engine::run(Job &job, Slot &sl) {
     GenerationRequest &req = job.req;
     const bool is_greedy = (req.sampling.temperature == 0.0);
-    const Options::MtpGateRule active_gate = is_greedy ? options_.mtp_gate_rule : options_.sampled_gate;
+    const MtpRuntimeConfig mtp_cfg = get_mtp_config(is_greedy);
+    const Options::MtpGateRule active_gate = mtp_cfg.gate_rule;
     GenerationSink &sink = *job.sink;
     GenerationResult res;
     int64_t generated_counted = 0;  // of res.completion_tokens, already in stats_.generated_tokens (per decode step)
@@ -1478,7 +1479,7 @@ void Engine::run(Job &job, Slot &sl) {
                 // Several slots decoding: at most as many drafts as let every slot's verify run fit one batched
                 // forward (max_verify_rows / decoding slots - 1: 2 slots 7, 3 slots 4, 4 slots 3). Past the budget the
                 // arbiter splits the batch in two forwards, and each slot's longer chain runs alone on the GPU.
-                int64_t draft_max = options_.mtp_draft;
+                int64_t draft_max = mtp_cfg.draft;
                 if (arbiter_) {
                     const int64_t n = std::max<int64_t>(1, arbiter_->decoding_count());
                     draft_max = std::min(draft_max, std::max<int64_t>(1, arbiter_->backend().max_verify_rows() / n - 1));
@@ -1495,11 +1496,11 @@ void Engine::run(Job &job, Slot &sl) {
                 const float tau_global = ema_T / std::max(1.0f, ema_E);
 
                 float P_cum = 1.0f;
-                const float draft_step_ms = (options_.mtp_hw_profile.draft_step_ms > 0.0f) ? options_.mtp_hw_profile.draft_step_ms : (sl.be ? sl.be->mtp_draft_step_ms() : kDefaultMtpDraftStepMs);
+                const float draft_step_ms = (mtp_cfg.hw_profile.draft_step_ms > 0.0f) ? mtp_cfg.hw_profile.draft_step_ms : (sl.be ? sl.be->mtp_draft_step_ms() : kDefaultMtpDraftStepMs);
 
                 for (int64_t step = 0; step < steps; ++step) {
                     const int64_t k_curr = step;
-                    const float delta_verify = get_verify_cost(k_curr + 2, &options_.mtp_hw_profile) - get_verify_cost(k_curr + 1, &options_.mtp_hw_profile);
+                    const float delta_verify = get_verify_cost(k_curr + 2, &mtp_cfg.hw_profile) - get_verify_cost(k_curr + 1, &mtp_cfg.hw_profile);
                     const float delta_T = draft_step_ms + delta_verify;
 
                     // Stage 1: Pre-draft optimistic check (Cost mode only)
@@ -1533,7 +1534,7 @@ void Engine::run(Job &job, Slot &sl) {
                     if (active_gate == Options::MtpGateRule::Cost) {
                         // Stage 2: Post-draft actual cost check via calibrated sigmoid model
                         const float delta_logits = t.best_v - t.second_v;
-                        const float p_calib = 1.0f / (1.0f + std::exp(-(options_.mtp_alpha * delta_logits + options_.mtp_beta * (float)step + options_.mtp_bias)));
+                        const float p_calib = 1.0f / (1.0f + std::exp(-(mtp_cfg.alpha * delta_logits + mtp_cfg.beta * (float)step + mtp_cfg.bias)));
                         const float p_next = std::clamp(p_calib, 0.01f, 0.995f);
                         const float P_cum_next = P_cum * p_next;
 
@@ -1546,9 +1547,9 @@ void Engine::run(Job &job, Slot &sl) {
                         P_cum = P_cum_next;
                     } else {
                         // Margin mode
-                        float required_margin = options_.mtp_margin;
-                        if (options_.mtp_escalating_margin) {
-                            required_margin += (float)step * options_.mtp_margin_slope;
+                        float required_margin = mtp_cfg.margin;
+                        if (mtp_cfg.escalating_margin) {
+                            required_margin += (float)step * mtp_cfg.margin_slope;
                         }
                         if (t.best_v - t.second_v < required_margin) break;
                         ids.push_back(d);
@@ -1602,9 +1603,9 @@ void Engine::run(Job &job, Slot &sl) {
 
                     // Renewal-Reward EMA update after MTP verify round:
                     const int64_t acc = j;
-                    const float round_T = get_verify_cost(k + 1, &options_.mtp_hw_profile) + (float)k * draft_step_ms;
+                    const float round_T = get_verify_cost(k + 1, &mtp_cfg.hw_profile) + (float)k * draft_step_ms;
                     const float round_E = 1.0f + (float)acc;
-                    const float decay = options_.mtp_ema_decay;
+                    const float decay = mtp_cfg.ema_decay;
                     ema_T = (1.0f - decay) * ema_T + decay * round_T;
                     ema_E = (1.0f - decay) * ema_E + decay * round_E;
 
@@ -1685,8 +1686,8 @@ void Engine::run(Job &job, Slot &sl) {
             }
             sl.seq.push_back(id);
             step(0, 0, 1);
-            const float decay = options_.mtp_ema_decay;
-            ema_T = (1.0f - decay) * ema_T + decay * get_verify_cost(1, &options_.mtp_hw_profile);
+            const float decay = mtp_cfg.ema_decay;
+            ema_T = (1.0f - decay) * ema_T + decay * get_verify_cost(1, &mtp_cfg.hw_profile);
             ema_E = (1.0f - decay) * ema_E + decay * 1.0f;
         }
         decoding.end();
