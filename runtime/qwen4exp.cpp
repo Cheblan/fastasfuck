@@ -2533,8 +2533,6 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
     const size_t e = es(act);
     const bool sep = m_.shared_separate();
     const bool wmma = prefill_math_ == PrefillMath::WmmaBf16;
-    STRIX_TRACE_STAGE(stage);
-    STRIX_TRACE_SET(stage, "embed");
     // Dense Q4 / Q8 projection: on the matrix units for large enough forwards when switched on.
     auto lin = [&](const void *x, const QWeightView &w, void *y, int64_t M, Act out_act) {
         if (wmma && M >= kWmmaMinTokens) kernels::linear_qw_wmma(x, w, y, M, act, out_act, stream_);
@@ -2593,6 +2591,8 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
     STRIX_TRACE_RANGE(std::string(batch.size() == 1 && runs[0].sq->gdn_to_spare ? "verify"
                                 : T == 1 ? "decode" : "prefill") + " T=" + std::to_string(T) +
                       " runs=" + std::to_string(batch.size()));
+    STRIX_TRACE_STAGE(stage);
+    STRIX_TRACE_SET(stage, "embed");
     if (runs.size() > 1) {  // the batch's decode-size scalar contract (see the header's forward_batch)
         STRIX_CHECK(image == nullptr, "Qwen4ExpSession::forward: ", runs.size(),
                     " runs and an image forward - image rows run alone (vision's one-forward-one-image contract)");
