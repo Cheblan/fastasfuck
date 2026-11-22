@@ -53,6 +53,8 @@ public:
     bool run_concurrent(int seq, bool advisory, const std::function<void()> &f);
     // seq's verify, joined into a batch with the other decoding seqs' (see above); returns seq's rows.
     LogitRows verify(int seq, const LmBackend::VerifyRun &run, bool cands, int64_t n_valid);
+    // seq's draft, joined into a batch with other decoding seqs'; returns seq's top2.
+    Top2 draft_top2(int seq, int32_t token_id, int64_t step);
     // seq resets its state: after a failure the first one resets the whole backend; a pending resolution of seq's is
     // dropped first.
     void reset(int seq);
@@ -68,7 +70,8 @@ public:
 
     // How long a waiting verify holds its batch for a decoding seq that hasn't sent its own yet,
     // within [kBatchWaitMinSeconds, kBatchWaitMaxSeconds].
-    static constexpr double kBatchWaitMinSeconds = 0.002, kBatchWaitMaxSeconds = 0.008;
+    static constexpr double kBatchWaitMinSeconds = 0.002, kBatchWaitMaxSeconds = 0.020;
+    static constexpr double kDraftWaitMaxSeconds = 0.0004;
     static constexpr int64_t kPrefillYieldBatches = 4;
     double batch_wait_locked() const;
 
@@ -90,6 +93,13 @@ private:
         LogitRows rows;
         std::exception_ptr error;
     };
+    struct PendingDraft {
+        LmBackend::MtpDraftRun run;
+        double since = 0;
+        bool done = false;
+        Top2 result;
+        std::exception_ptr error;
+    };
     void check_ok_locked(int seq) const;
     bool poisoned_locked(int seq) const;  // a failure since seq's last reset (check_ok_locked's condition, inverted)
     void fail_locked();  // a call failed with the backend failed(): every seq refuses until its reset
@@ -98,12 +108,15 @@ private:
     bool others_decoding_locked(int seq) const;
     bool lead_ready_locked(double now) const;  // the pending verifies should run as a batch now
     void run_batch(std::unique_lock<std::mutex> &lock);
+    bool draft_ready_locked(double now) const;  // the pending drafts should run as a batch now
+    void run_draft_batch(std::unique_lock<std::mutex> &lock);
 
     LmBackend &be_;
     mutable std::mutex mu_;
     std::condition_variable cv_;
     bool busy_ = false;               // a call or a batch is on the GPU
     std::map<int, Pending> pending_;  // verifies waiting for their batch (and their results until taken)
+    std::map<int, PendingDraft> pending_drafts_;  // drafts waiting for their batch
     std::set<int> resolving_;         // seqs of the last batch that have not kept / dropped yet
     std::set<int> decoding_;
     bool failed_ = false;             // a failure since: every seq resets before its next call
@@ -120,7 +133,6 @@ private:
     std::multiset<int> prefill_waiting_;
     int64_t last_prefill_batch_ = -kPrefillYieldBatches;  // stats_.verify_batches when the last prefill chunk ran
     int last_prefill_seq_ = -1;             // seq that ran the last prefill chunk (for round-robin)
-    int active_drafts_ = 0;                 // total active Kind::Draft calls across all seqs
     std::vector<int> concurrent_;           // per-seq active run_concurrent calls (awaited by reset)
     int concurrent_total_ = 0;              // total active across all seqs (awaited by whole reset)
 };

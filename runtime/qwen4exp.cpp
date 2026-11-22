@@ -1086,6 +1086,9 @@ Qwen4ExpSession::Qwen4ExpSession(const Qwen4ExpModel &model, int64_t capacity, i
         std::vector<float> ones((size_t)(M * D.H), 1.0f);
         mtp_ones_ = DeviceBuffer<float>(ones.size(), "MTP ones");
         STRIX_HIP_CHECK(hipMemcpy(mtp_ones_.get(), ones.data(), ones.size() * 4, hipMemcpyHostToDevice), "MTP ones");
+        mtp_batch_picks_ = DeviceBuffer<kernels::MtpPick>((size_t)n_slots, "batched MTP picks");
+        host_batch_picks_ = PinnedHostBuffer((size_t)n_slots * sizeof(kernels::MtpPick), "batched host MTP picks");
+        host_batch_ids_ = PinnedHostBuffer((size_t)n_slots * sizeof(int32_t), "batched host MTP ids");
     }
     // The other slots' states (each at the full capacity), each only while it leaves MemAvailable above the floor
     // (its cost measured on slot 0's, +10% for what varies): on this machine the GPU allocates from system RAM, and RAM
@@ -3686,33 +3689,250 @@ Qwen4ExpSession::MtpTop2 Qwen4ExpSession::forward_mtp_top2(int32_t token_id, int
 }
 
 Qwen4ExpSession::MtpTop2 Qwen4ExpSession::forward_mtp_top2_seq(int seq, int32_t token_id, int64_t step) {
-    run_mtp(seq, token_id, step);
-    auto &ws = seqs_[(size_t)seq]->mtp_ws;
-    hipStream_t stream = ws.stream;
-    auto *dev = reinterpret_cast<kernels::MtpPick *>(ws.mtp_pick.get());
-    const int64_t pick_vocab = !m_.compact_to_vocab().empty() ? m_.draft_head_q4().N() : mtp_vocab_;
-    kernels::mtp_pick(ws.logits.get(), pick_vocab, ws.router_err.get(), ws.expert_err.get(), ws.attn_err.get(),
-                      reinterpret_cast<kernels::EmbeddingError *>(ws.emb_err.get()), dev, stream);
-    auto *host = reinterpret_cast<kernels::MtpPick *>(ws.host_pick.get());
-    STRIX_HIP_CHECK(hipMemcpyAsync(host, dev, sizeof(kernels::MtpPick), hipMemcpyDeviceToHost, stream),
-                    "Qwen4ExpSession::forward_mtp_top2: the pick");
-    STRIX_HIP_CHECK(hipStreamSynchronize(stream), "Qwen4ExpSession::forward_mtp_top2: end of the draft");
-    const kernels::MtpPick p = *host;
-    kernels::report_router_error(p.err, "Qwen4ExpSession MTP router");
-    kernels::report_expert_error(p.err + 3, "Qwen4ExpSession MTP experts");
-    kernels::report_attention_error(p.err + 6, "Qwen4ExpSession MTP QSA attention");
-    kernels::report_embedding_error(p.emb, m_.dims().vocab);
-    STRIX_CHECK(p.nan || (p.best >= 0 && p.best < pick_vocab), "Qwen4ExpSession::forward_mtp_top2: pick ", p.best,
-                " outside the draft vocabulary [0, ", pick_vocab, ")");
-    int32_t final_best = p.best;
-    if (!m_.compact_to_vocab().empty() && !p.nan) {
-        STRIX_CHECK(final_best >= 0 && final_best < (int32_t)m_.compact_to_vocab().size(),
-                    "Qwen4ExpSession::forward_mtp_top2: compact index ", final_best, " out of range [0, ",
-                    m_.compact_to_vocab().size(), ")");
-        final_best = m_.compact_to_vocab()[(size_t)final_best];
+    std::vector<MtpDraftRun> runs = {{seq, token_id, step}};
+    std::vector<MtpTop2> res = forward_mtp_top2_batch(runs);
+    STRIX_CHECK(res.size() == 1, "forward_mtp_top2_seq: expected 1 result");
+    return res[0];
+}
+
+std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) {
+    const char *fn = "Qwen4ExpSession::forward_mtp_top2_batch";
+    if (runs.empty()) return {};
+    STRIX_CHECK(mtp_, fn, ": the session was made without MTP");
+    STRIX_CHECK(!broken_, fn, ": an earlier session call failed midway; reset() the session first");
+    const int64_t T = (int64_t)runs.size();
+    STRIX_CHECK(T <= n_slots(), fn, ": ", T, " runs, expected <= ", n_slots());
+    const Qwen4ExpDims &D = m_.dims();
+    const Act act = m_.act();
+    const size_t e = es(act);
+    const int64_t n4 = D.H * D.d;
+    const bool sep = m_.shared_separate();
+    const int64_t A = D.top_k + (sep ? 0 : 1), hd = D.hd;
+    const Qwen4ExpModel::MtpHead &mtp = m_.mtp();
+    const Qwen4ExpModel::Layer &l = mtp.layer;
+
+    STRIX_TRACE_RANGE("draft_batch T=" + std::to_string(T));
+
+    // 1. Validate runs and ensure per-slot state rows
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        const int seq = runs[r].seq;
+        const int32_t token_id = runs[r].token_id;
+        const int64_t step = runs[r].step;
+        STRIX_CHECK(seq >= 0 && seq < n_slots(), fn, ": seq ", seq, ", expected 0..", n_slots() - 1);
+        for (size_t j = 0; j < r; ++j) {
+            STRIX_CHECK(runs[j].seq != seq, fn, ": duplicate seq ", seq, " in batch");
+        }
+        Qwen4ExpSeqState &sq = *seqs_[(size_t)seq];
+        STRIX_CHECK(!sq.verify_pending, fn, ": seq ", seq, " awaits keep_verify / drop_verify - resolve before drafting");
+        STRIX_CHECK(token_id >= 0 && token_id < D.vocab, fn, ": token ", token_id, " outside [0, ", D.vocab, ")");
+        STRIX_CHECK(step >= 0, fn, ": step ", step, ", expected >= 0");
+        STRIX_CHECK(step == 0 || (sq.mtp_chain_pos == sq.pos && sq.mtp_chain_step == step - 1), fn, ": step ",
+                    step, " doesn't continue a chain (last step ", sq.mtp_chain_step, " at position ", sq.mtp_chain_pos,
+                    ", now at ", sq.pos, ")");
+        const int64_t p = sq.pos + step;
+        STRIX_CHECK(p < capacity_, fn, ": position ", p, " is at capacity ", capacity_);
+        STRIX_CHECK(sq.pending3.empty(), fn, ": seq ", seq, " carries in-flight mRoPE 3D positions");
+        ensure_rows(sq, p + 1);
+        sq.mtp_chain_step = -1;
     }
-    mtp_done(seq, step);
-    return {final_best, p.best_v, p.second_v, p.nan != 0};
+
+    // 2. Upload batched token IDs
+    int32_t *h_ids = reinterpret_cast<int32_t *>(host_batch_ids_.get());
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        h_ids[r] = runs[r].token_id;
+    }
+    STRIX_HIP_CHECK(hipMemcpyAsync(ids_.get(), h_ids, (size_t)T * sizeof(int32_t),
+                                   hipMemcpyHostToDevice, stream_),
+                    "uploading batched MTP token ids");
+    kernels::reset_embedding_error(emb_err_.get(), stream_);
+
+    // 3. Batched embedding lookup and rmsnorm
+    if (m_.is_embed_q8()) {
+        kernels::embedding_lookup(ids_.get(), T, m_.embed_q8(), mtp_emb_.get(), act,
+                                  emb_err_.get(), stream_);
+    } else {
+        kernels::embedding_lookup(ids_.get(), T, m_.embed(), D.vocab, D.d, mtp_emb_.get(), act,
+                                  emb_err_.get(), stream_);
+    }
+    kernels::rmsnorm_zc(mtp_emb_.get(), mtp.pre_fc_norm_embedding, mtp_norm_emb_.get(),
+                        T, D.d, D.eps, act, stream_);
+
+    // 4. Per-run hidden stream group norm from previous stream
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        Qwen4ExpSeqState &sq = *seqs_[(size_t)runs[r].seq];
+        const void *prev0_r = (runs[r].step == 0) ? sq.mtp_prev.get() : sq.mtp_chain_prev.get();
+        STRIX_CHECK(prev0_r != nullptr, fn, ": null previous streams for seq ", runs[r].seq);
+        uint8_t *dst_norm_hid = mtp_norm_hid_.get() + (size_t)(r * n4) * e;
+        kernels::group_rmsnorm_zc(prev0_r, mtp.pre_fc_norm_hidden, dst_norm_hid, 1, D.H, D.d, D.eps, act, stream_);
+    }
+
+    // 5. Batched dense input projections & injection
+    kernels::linear_qw(mtp_norm_emb_.get(), mtp.fc_embedding, mtp_proj_emb_.get(), T, act, act, stream_);
+    kernels::linear_qw(mtp_norm_hid_.get(), mtp.fc_hidden, mtp_x_.get(), T * D.H, act, act, stream_);
+    kernels::hc_inject(mtp_x_.get(), mtp_ones_.get(), mtp_proj_emb_.get(), T, D.H, D.d, act, stream_);
+
+    // Helper: always ungrouped GEMV HC mix (guarantees bit-identity across T=1..8)
+    auto hc_mix = [&](const Qwen4ExpModel::Hc &hc, bool inject, uint8_t *xb, uint8_t *ub) {
+        float *w_in = inject ? w_in_.get() : nullptr;
+        if (hc.down.bits == 8)
+            kernels::hc_mix_down(xb, hc.down.q8, T, D.H, D.d, D.r, inject, D.eps, h_.get(), w_in, inv_.get(), act, stream_);
+        else
+            kernels::hc_mix_down(xb, hc.down.q4, T, D.H, D.d, D.r, inject, D.eps, h_.get(), w_in, inv_.get(), act, stream_);
+        if (hc.up.bits == 8)
+            kernels::hc_mix_up(h_.get(), hc.up.q8, xb, hc.norm, inv_.get(), T, D.H, D.d, ub, act, stream_);
+        else
+            kernels::hc_mix_up(h_.get(), hc.up.q4, xb, hc.norm, inv_.get(), T, D.H, D.d, ub, act, stream_);
+    };
+
+    // 6. Attention Hyper-Connection & batched QKV projection
+    hc_mix(l.hc_attn, true, mtp_x_.get(), u_.get());
+    kernels::linear_qw(u_.get(), l.qkv, proj_.get(), T, act, act, stream_);
+
+    // 7. Per-slot Attention loop
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        const int seq = runs[r].seq;
+        const int64_t step = runs[r].step;
+        Qwen4ExpSeqState &sq = *seqs_[(size_t)seq];
+        const int64_t p = sq.pos + step;
+        const int64_t rope_p = p + sq.rope_delta;
+        const kernels::MropePos no_mrope{};
+        const bool qsa_layer = p + 1 > D.dense_key_limit();
+
+        const void *tail_in = step == 0 ? sq.tail_mtp[sq.mtp_tail_cur].get()
+                              : step == 1 ? sq.tail_mtp[1 - sq.mtp_tail_cur].get()
+                                          : sq.mtp_chain_tail[step % 2].get();
+        void *tail_out = step == 0 ? sq.tail_mtp[1 - sq.mtp_tail_cur].get()
+                                   : sq.mtp_chain_tail[(step + 1) % 2].get();
+
+        uint8_t *kc = sq.k_cache_mtp.get(), *vc = sq.v_cache_mtp.get();
+        uint8_t *proj_r = proj_.get() + (size_t)(r * D.astride) * e;
+        uint8_t *core_r = core_.get() + (size_t)(r * D.hq * hd) * e;
+        auto at_r = [&](size_t col) { return proj_r + col * e; };
+
+        const kernels::NormRopeJob nr[4] = {
+            {proj_r, D.astride, 2 * hd, proj_r, D.astride, 2 * hd, D.hq, hd, l.q_norm},
+            {at_r(D.hq * 2 * hd), D.astride, hd, kc + (size_t)(p * D.hkv * hd) * e, D.hkv * hd, hd, D.hkv, hd, l.k_norm},
+            {at_r(D.hq * 2 * hd + D.hkv * hd), D.astride, hd, vc + (size_t)(p * D.hkv * hd) * e, D.hkv * hd, hd, D.hkv, hd, nullptr},
+            {at_r(D.idx_col), D.astride, D.idx_d, at_r(D.idx_col), D.astride, D.idx_d, D.idx_h, D.idx_d, l.idx_q_norm}
+        };
+        kernels::qk_norm_rope_jobs(nr, qsa_layer ? 4 : 3, 1, D.eps, D.rot, rope_p, m_.inv_freq(), act, stream_,
+                                   m_.rope_scale(), no_mrope);
+        kernels::qsa_block_keys(at_r(D.idx_col + D.idx_h * D.idx_d), D.astride, 1, p,
+                                p % kernels::kQsaBlock ? tail_in : nullptr, tail_out, D.idx_d, l.idx_k_norm, D.eps, m_.inv_freq(),
+                                D.rot, sq.block_keys_mtp.get(), cap_blocks_, act, stream_, m_.rope_scale(), no_mrope, sq.rope_delta);
+        const kernels::AttentionShape as{1, p, D.hq, D.hkv, hd, D.astride, 2 * hd};
+        const float scale = 1.0f / std::sqrt((float)hd);
+
+        if (!qsa_layer) {
+            kernels::attention(proj_r, at_r(hd), kc, vc, capacity_, as, scale, core_r,
+                               attn_ws_.get(), attn_ws_bytes_, act, stream_);
+        } else {
+            const int64_t qsa_k = D.qsa_budget / kernels::kQsaBlock;
+            void *iq = at_r(D.idx_col);
+            float *slot_scores = qsa_scores_.get() + (size_t)r * cap_blocks_;
+            int32_t *slot_sel = qsa_sel_.get() + (size_t)r * qsa_k;
+            int32_t *slot_nsel = qsa_nsel_.get() + (size_t)r;
+            kernels::qsa_scores(iq, D.astride, D.idx_d, 1, p, D.idx_h, D.idx_d, sq.block_keys_mtp.get(), cap_blocks_,
+                                slot_scores, cap_blocks_, act, stream_);
+            kernels::qsa_topk(slot_scores, cap_blocks_, 1, p, qsa_k, slot_sel, slot_nsel,
+                              qsa_topk_ws_.get(), qsa_topk_ws_bytes_, stream_);
+            kernels::attention_gathered(proj_r, at_r(hd), kc, vc, capacity_, as, slot_sel,
+                                        slot_nsel, qsa_k, scale, core_r, attn_ws_.get(), attn_ws_bytes_,
+                                        attn_err_.get(), act, stream_);
+        }
+    }
+
+    // 8. Batched O projection & injection
+    kernels::linear_qw(core_.get(), l.o_proj, y_.get(), T, act, act, stream_);
+    kernels::hc_inject(mtp_x_.get(), w_in_.get(), y_.get(), T, D.H, D.d, act, stream_);
+
+    // 9. MLP Hyper-Connection & MoE
+    hc_mix(l.hc_mlp, true, mtp_x_.get(), u_.get());
+    kernels::linear_bf16w(u_.get(), l.router, router_logits_.get(), T, D.experts + 1, D.d, act, Act::F32, stream_);
+    kernels::moe_router(router_logits_.get(), D.experts + 1, T, D.experts, D.top_k,
+                        sep ? nullptr : router_logits_.get() + D.experts, D.experts + 1, (int32_t)D.experts,
+                        route_ids_.get(), route_coef_.get(), Act::F32, router_err_.get(), stream_);
+
+    const int64_t Estack = D.experts + (sep ? 0 : 1);
+    // Ungrouped MoE: linear_qw_experts_gather_swiglu and linear_qw_experts_combine
+    kernels::linear_qw_experts_gather_swiglu(u_.get(), l.gate_up, Estack, route_ids_.get(), T, A, hh_.get(), act,
+                                             expert_err_.get(), stream_);
+    kernels::linear_qw_experts_combine(hh_.get(), l.down, Estack, route_ids_.get(), route_coef_.get(), T, A, y_.get(),
+                                       act, expert_err_.get(), stream_);
+    if (sep) {
+        kernels::linear_qw(u_.get(), l.shared_gate_up, gu_.get(), T, act, act, stream_);
+        kernels::swiglu(gu_.get(), hh_.get(), T, D.inter, act, stream_);
+        kernels::linear_qw(hh_.get(), l.shared_down, sh_y_.get(), T, act, act, stream_);
+        kernels::moe_shared_add_inject(y_.get(), sh_y_.get(), router_logits_.get() + D.experts, D.experts + 1, T, D.d,
+                                       (uint32_t)D.experts, mtp_x_.get(), w_in_.get(), D.H, act, router_err_.get(),
+                                       stream_);
+    } else {
+        kernels::hc_inject(mtp_x_.get(), w_in_.get(), y_.get(), T, D.H, D.d, act, stream_);
+    }
+
+    // 10. Copy each run's output streams to its mtp_chain_prev for the next step
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        Qwen4ExpSeqState &sq = *seqs_[(size_t)runs[r].seq];
+        STRIX_HIP_CHECK(hipMemcpyAsync(sq.mtp_chain_prev.get(), mtp_x_.get() + (size_t)(r * n4) * e,
+                                       (size_t)n4 * e, hipMemcpyDeviceToDevice, stream_),
+                        "saving MTP chain prev streams");
+    }
+
+    // 11. Final HC mixer & batched LM head projection
+    hc_mix(mtp.hc_mixer, false, mtp_x_.get(), u_.get());
+    const QWeightView &draft = m_.draft_head_q4();
+    const bool is_compact = !m_.compact_to_vocab().empty();
+    QWeightView head = (draft.bits != 0 && (is_compact || mtp_vocab_ <= draft.N())) ? draft : m_.lm_head();
+    const int64_t target_rows = is_compact ? draft.N() : mtp_vocab_;
+    STRIX_CHECK(head.K() == m_.lm_head().K() && target_rows <= head.N(),
+                fn, ": draft head [", head.N(), ", ", head.K(), "] for target_rows ", target_rows,
+                " and the LM head's K ", m_.lm_head().K());
+    switch (head.bits) {
+        case 8: head.q8.N = target_rows; break;
+        case 6: head.q6.N = target_rows; break;
+        case 5: head.q5.N = target_rows; break;
+        case 4: head.q4.N = target_rows; break;
+        default: STRIX_FAIL(fn, ": LM head has ", head.bits, " bits, expected 4, 5, 6 or 8");
+    }
+    kernels::linear_qw(u_.get(), head, logits_.get(), T, act, Act::F32, stream_);
+
+    // 12. Per-slot pick kernels and single host readback
+    const int64_t pick_vocab = target_rows;
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        const float *r_logits = logits_.get() + (size_t)r * (size_t)pick_vocab;
+        auto *dev_pick = mtp_batch_picks_.get() + r;
+        kernels::mtp_pick(r_logits, pick_vocab, router_err_.get(), expert_err_.get(), attn_err_.get(),
+                          emb_err_.get(), dev_pick, stream_);
+    }
+
+    auto *host_picks = reinterpret_cast<kernels::MtpPick *>(host_batch_picks_.get());
+    STRIX_HIP_CHECK(hipMemcpyAsync(host_picks, mtp_batch_picks_.get(),
+                                   (size_t)T * sizeof(kernels::MtpPick),
+                                   hipMemcpyDeviceToHost, stream_),
+                    "reading batched MTP picks");
+    STRIX_HIP_CHECK(hipStreamSynchronize(stream_), "syncing batched MTP draft");
+
+    // 13. Decode picks and return MtpTop2 results
+    std::vector<MtpTop2> results((size_t)T);
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        const kernels::MtpPick &p = host_picks[r];
+        kernels::report_router_error(p.err, "Qwen4ExpSession MTP router");
+        kernels::report_expert_error(p.err + 3, "Qwen4ExpSession MTP experts");
+        kernels::report_attention_error(p.err + 6, "Qwen4ExpSession MTP QSA attention");
+        kernels::report_embedding_error(p.emb, m_.dims().vocab);
+        STRIX_CHECK(p.nan || (p.best >= 0 && p.best < pick_vocab),
+                    fn, ": pick ", p.best, " outside the draft vocabulary [0, ", pick_vocab, ")");
+        int32_t final_best = p.best;
+        if (!m_.compact_to_vocab().empty() && !p.nan) {
+            STRIX_CHECK(final_best >= 0 && final_best < (int32_t)m_.compact_to_vocab().size(),
+                        fn, ": compact index ", final_best, " out of range [0, ",
+                        m_.compact_to_vocab().size(), ")");
+            final_best = m_.compact_to_vocab()[(size_t)final_best];
+        }
+        mtp_done(runs[r].seq, runs[r].step);
+        results[r] = {final_best, p.best_v, p.second_v, p.nan != 0};
+    }
+    return results;
 }
 
 void Qwen4ExpSession::mtp_done(int seq, int64_t step) {

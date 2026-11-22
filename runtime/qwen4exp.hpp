@@ -28,6 +28,7 @@
 #include "kernels/attention.hpp"  // AttnPrecision
 #include "kernels/gdn.hpp"        // DrPrecision
 #include "kernels/norm.hpp"  // Act
+#include "kernels/mtp_pick.hpp"
 #include "runtime/device_buffer.hpp"
 #include "runtime/ngram_rows.hpp"
 #include "runtime/paged_state.hpp"  // PagedState: the host-only view of a parked conversation
@@ -901,8 +902,14 @@ public:
         float best_v = 0, second_v = 0;
         bool nan = false;
     };
+    struct MtpDraftRun {
+        int seq = 0;
+        int32_t token_id = 0;
+        int64_t step = 0;
+    };
     MtpTop2 forward_mtp_top2(int32_t token_id, int64_t step = 0);
     MtpTop2 forward_mtp_top2_seq(int seq, int32_t token_id, int64_t step = 0);  // the draft's pick on a slot
+    std::vector<MtpTop2> forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs);
     // The draft's vocabulary: forward_mtp scores only ids [0, n) (the LM head's first n rows - BPE ids run roughly
     // by frequency) and returns n logits. Default: the whole vocabulary. 1..vocab.
     void set_mtp_vocab(int64_t n);
@@ -978,6 +985,9 @@ private:
     void run_mtp(int seq, int32_t token_id, int64_t step);
     void mtp_done(int seq, int64_t step);
     DeviceBuffer<uint8_t> mtp_pick_;  // kernels::MtpPick on the device (allocated on the first forward_mtp_top2)
+    DeviceBuffer<kernels::MtpPick> mtp_batch_picks_;
+    PinnedHostBuffer host_batch_picks_;
+    PinnedHostBuffer host_batch_ids_;
     // Grouped experts for multi-token forwards (kernels/moe_grouped): the route grouping and combine's FP32
     // per-slot dots. Allocated when max_tokens reaches kGroupedMinTokens.
     // QSA selection past dense_key_limit(): scores [max_tokens, cap_blocks] F32, the kept blocks [max_tokens,

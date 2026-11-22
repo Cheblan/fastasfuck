@@ -213,6 +213,19 @@ public:
         check_seq(seq, "forward_mtp_top2");
         return forward_mtp_top2(token_id, step);
     }
+    struct MtpDraftRun {
+        int seq = 0;
+        int32_t token_id = 0;
+        int64_t step = 0;
+    };
+    virtual std::vector<Top2> forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) {
+        std::vector<Top2> out;
+        out.reserve(runs.size());
+        for (const auto &r : runs) {
+            out.push_back(forward_mtp_top2(r.seq, r.token_id, r.step));
+        }
+        return out;
+    }
     virtual void prefetch_ple(int seq, const std::vector<int32_t> &ids, int64_t first) {
         check_seq(seq, "prefetch_ple");
         prefetch_ple(ids, first);

@@ -34,6 +34,9 @@ void GpuArbiter::fail_locked() {
     for (auto &[s, p] : pending_)
         if (!p.done) p.done = true, p.error = std::make_exception_ptr(std::runtime_error(
                                          "GpuArbiter: the batched verify was abandoned - another slot's call failed"));
+    for (auto &[s, d] : pending_drafts_)
+        if (!d.done) d.done = true, d.error = std::make_exception_ptr(std::runtime_error(
+                                         "GpuArbiter: the batched draft was abandoned - another slot's call failed"));
 }
 
 bool GpuArbiter::has_pending_verifies_locked() const {
@@ -49,7 +52,7 @@ bool GpuArbiter::others_decoding_locked(int seq) const {
 }
 
 bool GpuArbiter::can_run_locked(int seq, Kind kind) const {
-    if (busy_ || active_drafts_ > 0) return false;
+    if (busy_) return false;
     if (kind == Kind::Hint) return true;
     if (kind == Kind::Resolve) return resolving_.count(seq) > 0;
     if (!resolving_.empty()) return false;  // the batch's resolutions first (its shared workspaces)
@@ -85,34 +88,6 @@ bool GpuArbiter::poisoned_locked(int seq) const {
 }
 
 bool GpuArbiter::run(int seq, Kind kind, const std::function<void()> &f) {
-    if (kind == Kind::Draft) {
-        std::unique_lock<std::mutex> lock(mu_);
-        STRIX_CHECK(seq >= 0 && seq < (int)epoch_.size(), "GpuArbiter: seq ", seq, ", expected 0..", epoch_.size() - 1);
-        check_ok_locked(seq);
-        while (!failed_ && busy_) {
-            cv_.wait(lock);
-        }
-        if (failed_) check_ok_locked(seq);
-        ++active_drafts_;
-        lock.unlock();
-        auto finish = [&](bool thrown) {
-            lock.lock();
-            const bool zero_drafts = --active_drafts_ == 0;
-            const bool failed = thrown && !failed_ && !busy_ && be_.failed();
-            if (failed) fail_locked();
-            lock.unlock();
-            if (zero_drafts || failed) cv_.notify_all();
-        };
-        try {
-            f();
-        } catch (...) {
-            finish(true);
-            throw;
-        }
-        finish(false);
-        return true;
-    }
-
     std::unique_lock<std::mutex> lock(mu_);
     // A Hint is advisory (reads, prefetches): after a failed call there is nothing trustworthy left to read,
     // so it skips f and reports false instead of throwing - an advisory call must never be what takes a worker
@@ -191,7 +166,7 @@ bool GpuArbiter::run_concurrent(int seq, bool advisory, const std::function<void
 }
 
 bool GpuArbiter::lead_ready_locked(double now) const {
-    if (busy_ || active_drafts_ > 0 || !resolving_.empty() || !calls_waiting_.empty()) return false;
+    if (busy_ || !resolving_.empty() || !calls_waiting_.empty()) return false;
     double first = 0;
     int waiting = 0;
     bool first_alone = false;  // the oldest waiting run can't share a forward: no partner to wait for
@@ -199,19 +174,30 @@ bool GpuArbiter::lead_ready_locked(double now) const {
         if (!p.done && (!waiting++ || p.since < first)) first = p.since, first_alone = !p.batchable;
     if (waiting == 0) return false;
     if (first_alone) return true;
+
+    const bool timed_out = (now - first >= batch_wait_locked());
+
+    // If not timed out, let active drafters run on GPU first
+    if (!timed_out && !pending_drafts_.empty()) {
+        for (const auto &[s, d] : pending_drafts_) {
+            if (!d.done) return false;
+        }
+    }
+
     bool host_side = false;  // a decoding seq still to come that is busy on the host (sampling, parsing, streaming) or drafting
     for (int s : decoding_) {
         if (pending_.count(s) && !pending_.at(s).done) continue;
+        if (!timed_out && pending_drafts_.count(s) && !pending_drafts_.at(s).done) continue;
         host_side = true;
     }
-    return !host_side || now - first >= batch_wait_locked();  // every decoding seq is in, or the host-side wait ran out
+    return !host_side || timed_out;  // every decoding seq is in, or the host-side wait ran out
 }
 
 double GpuArbiter::batch_wait_locked() const {
     if (!calls_waiting_.empty() || !prefill_waiting_.empty()) {
         return kBatchWaitMinSeconds;
     }
-    return std::clamp(0.12 * last_batch_seconds_, kBatchWaitMinSeconds, kBatchWaitMaxSeconds);
+    return std::clamp(0.35 * last_batch_seconds_, kBatchWaitMinSeconds, kBatchWaitMaxSeconds);
 }
 
 void GpuArbiter::run_batch(std::unique_lock<std::mutex> &lock) {
@@ -226,7 +212,7 @@ void GpuArbiter::run_batch(std::unique_lock<std::mutex> &lock) {
     const int64_t budget = be_.max_verify_rows();
     bool cands = false;
     int64_t n_valid = 0;
-    cv_.wait(lock, [&] { return !busy_ && active_drafts_ == 0; });
+    cv_.wait(lock, [&] { return !busy_; });
     for (int s : order) {
         const Pending &p = pending_[s];
         const int64_t r = (int64_t)p.run.ids.size();
@@ -272,6 +258,100 @@ void GpuArbiter::run_batch(std::unique_lock<std::mutex> &lock) {
     cv_.notify_all();
 }
 
+bool GpuArbiter::draft_ready_locked(double now) const {
+    if (busy_ || !resolving_.empty() || !calls_waiting_.empty()) return false;
+    double first = 0;
+    int waiting = 0;
+    for (const auto &[s, d] : pending_drafts_) {
+        if (!d.done) {
+            if (!waiting++ || d.since < first) first = d.since;
+        }
+    }
+    if (waiting == 0) return false;
+    if (decoding_.size() <= 1) return true;
+
+    bool all_in = true;
+    for (int s : decoding_) {
+        if (resolving_.count(s)) continue;
+        if (pending_.count(s) && !pending_.at(s).done) continue;
+        if (pending_drafts_.count(s) && !pending_drafts_.at(s).done) continue;
+        all_in = false;
+        break;
+    }
+    return all_in || (now - first >= kDraftWaitMaxSeconds);
+}
+
+void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
+    std::vector<int> members;
+    std::vector<LmBackend::MtpDraftRun> runs;
+    for (const auto &[s, d] : pending_drafts_) {
+        if (!d.done) {
+            members.push_back(s);
+            runs.push_back(d.run);
+        }
+    }
+    if (runs.empty()) return;
+    cv_.wait(lock, [&] { return !busy_; });
+    busy_ = true;
+    lock.unlock();
+
+    std::vector<Top2> results;
+    std::exception_ptr err;
+    try {
+        results = be_.forward_mtp_top2_batch(runs);
+        STRIX_CHECK(results.size() == runs.size(), "GpuArbiter: forward_mtp_top2_batch returned ",
+                    results.size(), " results for ", runs.size(), " runs");
+    } catch (...) {
+        err = std::current_exception();
+    }
+
+    lock.lock();
+    busy_ = false;
+    if (err && be_.failed()) {
+        for (int m : members) {
+            pending_drafts_[m].done = true;
+            pending_drafts_[m].error = err;
+        }
+        fail_locked();
+    } else {
+        for (size_t i = 0; i < members.size(); ++i) {
+            PendingDraft &d = pending_drafts_[members[i]];
+            d.done = true;
+            if (err) d.error = err;
+            else d.result = results[i];
+        }
+    }
+    cv_.notify_all();
+}
+
+Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step) {
+    std::unique_lock<std::mutex> lock(mu_);
+    check_ok_locked(seq);
+    STRIX_CHECK(!pending_drafts_.count(seq), "GpuArbiter: seq ", seq, " drafts again before previous draft finished");
+    PendingDraft &me = pending_drafts_[seq];
+    me.run = {seq, token_id, step};
+    me.since = now_s();
+    me.done = false;
+    cv_.notify_all();
+
+    for (;;) {
+        if (me.done) break;
+        if (!busy_ && draft_ready_locked(now_s())) {
+            run_draft_batch(lock);
+            continue;
+        }
+        if (decoding_.size() <= 1) {
+            cv_.wait(lock, [&] { return me.done || (!busy_ && draft_ready_locked(now_s())); });
+        } else {
+            cv_.wait_for(lock, std::chrono::duration<double>(kDraftWaitMaxSeconds / 2));
+        }
+    }
+    PendingDraft done = std::move(me);
+    pending_drafts_.erase(seq);
+    if (done.error) std::rethrow_exception(done.error);
+    return done.result;
+}
+
 LogitRows GpuArbiter::verify(int seq, const LmBackend::VerifyRun &run, bool cands, int64_t n_valid) {
     std::unique_lock<std::mutex> lock(mu_);
     check_ok_locked(seq);
@@ -300,7 +380,7 @@ void GpuArbiter::reset(int seq) {
     std::unique_lock<std::mutex> lock(mu_);
     STRIX_CHECK(seq >= 0 && seq < (int)epoch_.size(), "GpuArbiter::reset: seq ", seq, ", expected 0..",
                 epoch_.size() - 1);
-    cv_.wait(lock, [&] { return !busy_ && active_drafts_ == 0 && (failed_ ? concurrent_total_ == 0 : concurrent_[(size_t)seq] == 0); });
+    cv_.wait(lock, [&] { return !busy_ && (failed_ ? concurrent_total_ == 0 : concurrent_[(size_t)seq] == 0); });
     busy_ = true;
     const bool whole = failed_;
     const bool drop = !whole && resolving_.count(seq) > 0;  // a request failed between its verify and its resolution
@@ -325,6 +405,7 @@ void GpuArbiter::reset(int seq) {
         epoch_[(size_t)seq] = failures_;
         if (last_prefill_seq_ == seq) last_prefill_seq_ = -1;
         resolving_.erase(seq);
+        pending_drafts_.erase(seq);
     } else if (be_.failed()) {
         fail_locked();
     }
@@ -396,9 +477,7 @@ void SeqBackend::set_lookahead(const std::vector<int32_t> &next_ids) {
 }
 
 Top2 SeqBackend::forward_mtp_top2(int32_t token_id, int64_t step) {
-    Top2 t;
-    arb_.run(seq_, GpuArbiter::Kind::Draft, [&] { t = arb_.backend().forward_mtp_top2(seq_, token_id, step); });
-    return t;
+    return arb_.draft_top2(seq_, token_id, step);
 }
 
 std::vector<float> SeqBackend::forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) {
