@@ -282,6 +282,7 @@ bool GpuArbiter::draft_ready_locked(double now) const {
 }
 
 void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
+    cv_.wait(lock, [&] { return !busy_; });
     std::vector<int> members;
     std::vector<LmBackend::MtpDraftRun> runs;
     for (const auto &[s, d] : pending_drafts_) {
@@ -291,7 +292,6 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
         }
     }
     if (runs.empty()) return;
-    cv_.wait(lock, [&] { return !busy_; });
     busy_ = true;
     lock.unlock();
 

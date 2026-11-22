@@ -34,9 +34,9 @@ namespace strix::kernels {
 // w: Q4 [r (+ H), H*d], folded as above; H == 4; d % 32 == 0 (a 32-code load
 // never straddles two streams); x 16-byte aligned. w_in may be null iff !inject.
 void hc_mix_down(const void *x, const Q4DeviceView &w, int64_t T, int64_t H, int64_t d, int64_t r, bool inject,
-                 float eps, float *h, float *w_in, float *inv, Act act, hipStream_t stream);
+                 float eps, float *h, float *w_in, float *inv, Act act, hipStream_t stream, int ks_override = 0);
 void hc_mix_down(const void *x, const Q8DeviceView &w, int64_t T, int64_t H, int64_t d, int64_t r, bool inject,
-                 float eps, float *h, float *w_in, float *inv, Act act, hipStream_t stream);
+                 float eps, float *h, float *w_in, float *inv, Act act, hipStream_t stream, int ks_override = 0);
 
 // u[t, j] = (1/H) sum_s sigmoid(W_up[s*d + j] . h[t]) * n[t, s*d + j],
 // n = X * inv[t, s] * (1 + norm_w) - the combine in the up projection's

@@ -1569,12 +1569,12 @@ void Qwen4ExpSession::reset_seq_state(Qwen4ExpSeqState &s) {
     s.pos3_host.clear(), s.pending3.clear(), s.verify_hist_before.clear();
     s.imported_at = -1;
     if (mtp_) {  // position 0's MTP row pairs its token with no trunk state: zeros
-        STRIX_HIP_CHECK(hipMemset(s.mtp_prev.get(), 0, s.mtp_prev.size()), "Qwen4ExpSession: zero MTP previous streams");
+        STRIX_HIP_CHECK(hipMemsetAsync(s.mtp_prev.get(), 0, s.mtp_prev.size(), stream_), "Qwen4ExpSession: zero MTP previous streams");
         if (s.mtp_ws.verify_done_event)
             STRIX_HIP_CHECK(hipEventRecord(s.mtp_ws.verify_done_event, stream_), "record verify_done_event on reset");
     }
     if (m_.dims().ple_layer >= 0) {
-        STRIX_HIP_CHECK(hipMemset(s.ple_state.get(), 0, s.ple_state.size()), "Qwen4ExpSession: zero PLE state");
+        STRIX_HIP_CHECK(hipMemsetAsync(s.ple_state.get(), 0, s.ple_state.size(), stream_), "Qwen4ExpSession: zero PLE state");
         s.ple_hist = PleHistory::fresh(m_.ngram_rows().hash_params());
     }
     s.rewind_to.push_back(0);
@@ -3771,13 +3771,13 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(co
     kernels::linear_qw(mtp_norm_hid_.get(), mtp.fc_hidden, mtp_x_.get(), T * D.H, act, act, stream_);
     kernels::hc_inject(mtp_x_.get(), mtp_ones_.get(), mtp_proj_emb_.get(), T, D.H, D.d, act, stream_);
 
-    // Helper: always ungrouped GEMV HC mix (guarantees bit-identity across T=1..8)
+    // Helper: always ungrouped GEMV HC mix with ks_override = 2 (guarantees bit-identity across T=1..8)
     auto hc_mix = [&](const Qwen4ExpModel::Hc &hc, bool inject, uint8_t *xb, uint8_t *ub) {
         float *w_in = inject ? w_in_.get() : nullptr;
         if (hc.down.bits == 8)
-            kernels::hc_mix_down(xb, hc.down.q8, T, D.H, D.d, D.r, inject, D.eps, h_.get(), w_in, inv_.get(), act, stream_);
+            kernels::hc_mix_down(xb, hc.down.q8, T, D.H, D.d, D.r, inject, D.eps, h_.get(), w_in, inv_.get(), act, stream_, /*ks_override=*/2);
         else
-            kernels::hc_mix_down(xb, hc.down.q4, T, D.H, D.d, D.r, inject, D.eps, h_.get(), w_in, inv_.get(), act, stream_);
+            kernels::hc_mix_down(xb, hc.down.q4, T, D.H, D.d, D.r, inject, D.eps, h_.get(), w_in, inv_.get(), act, stream_, /*ks_override=*/2);
         if (hc.up.bits == 8)
             kernels::hc_mix_up(h_.get(), hc.up.q8, xb, hc.norm, inv_.get(), T, D.H, D.d, ub, act, stream_);
         else
@@ -3822,10 +3822,15 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(co
                                 D.rot, sq.block_keys_mtp.get(), cap_blocks_, act, stream_, m_.rope_scale(), no_mrope, sq.rope_delta);
         const kernels::AttentionShape as{1, p, D.hq, D.hkv, hd, D.astride, 2 * hd};
         const float scale = 1.0f / std::sqrt((float)hd);
+        const bool wmma_attn = prefill_math_ == PrefillMath::WmmaBf16 && act == Act::BF16 && 1 >= kWmmaAttnMinTokens;
 
         if (!qsa_layer) {
-            kernels::attention(proj_r, at_r(hd), kc, vc, capacity_, as, scale, core_r,
-                               attn_ws_.get(), attn_ws_bytes_, act, stream_);
+            if (wmma_attn)
+                kernels::attention_wmma(proj_r, at_r(hd), kc, vc, capacity_, as, scale, core_r,
+                                        attn_ws_.get(), attn_ws_bytes_, act, stream_, precision_.attention);
+            else
+                kernels::attention(proj_r, at_r(hd), kc, vc, capacity_, as, scale, core_r,
+                                   attn_ws_.get(), attn_ws_bytes_, act, stream_);
         } else {
             const int64_t qsa_k = D.qsa_budget / kernels::kQsaBlock;
             void *iq = at_r(D.idx_col);
@@ -3836,9 +3841,14 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(co
                                 slot_scores, cap_blocks_, act, stream_);
             kernels::qsa_topk(slot_scores, cap_blocks_, 1, p, qsa_k, slot_sel, slot_nsel,
                               qsa_topk_ws_.get(), qsa_topk_ws_bytes_, stream_);
-            kernels::attention_gathered(proj_r, at_r(hd), kc, vc, capacity_, as, slot_sel,
-                                        slot_nsel, qsa_k, scale, core_r, attn_ws_.get(), attn_ws_bytes_,
-                                        attn_err_.get(), act, stream_);
+            if (wmma_attn)
+                kernels::attention_gathered_wmma(proj_r, at_r(hd), kc, vc, capacity_, as, slot_sel,
+                                                  slot_nsel, qsa_k, scale, core_r, attn_ws_.get(), attn_ws_bytes_,
+                                                  attn_err_.get(), act, stream_, precision_.attention);
+            else
+                kernels::attention_gathered(proj_r, at_r(hd), kc, vc, capacity_, as, slot_sel,
+                                            slot_nsel, qsa_k, scale, core_r, attn_ws_.get(), attn_ws_bytes_,
+                                            attn_err_.get(), act, stream_);
         }
     }
 

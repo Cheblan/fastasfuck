@@ -322,7 +322,7 @@ size_t act_size(const char *fn, Act act) {
 
 template <int BITS>
 void mix_down(const void *x, const QArrays &w, int64_t T, int64_t H, int64_t d, int64_t r, bool inject, float eps,
-              float *h, float *w_in, float *inv, Act act, hipStream_t stream) {
+              float *h, float *w_in, float *inv, Act act, hipStream_t stream, int ks_override = 0) {
     const char *fn = "hc_mix_down";
     check_shape(fn, T, H, d);
     check_weight(fn, w, BITS);
@@ -337,7 +337,7 @@ void mix_down(const void *x, const QArrays &w, int64_t T, int64_t H, int64_t d, 
     STRIX_CHECK(w.N == R, fn, ": weight has ", w.N, " rows, expected r", inject ? " + H" : "", " = ", R);
     STRIX_CHECK(reinterpret_cast<uintptr_t>(x) % 16 == 0, fn, ": x ", x, " must be 16-byte aligned");
     STRIX_CHECK(std::isfinite(eps) && eps > 0.f, fn, ": eps must be finite and > 0, got ", eps);
-    const int waves = kThreads / device_warp_size(kThreads), KS = split_k(T);
+    const int waves = kThreads / device_warp_size(kThreads), KS = ks_override > 0 ? ks_override : split_k(T);
     STRIX_CHECK(waves % KS == 0, fn, ": split-K factor ", KS, " must divide the ", waves, " waves of a block");
     const int RW = rows_per_wave(T);
     const int64_t rows_per_block = waves / KS * RW;
@@ -413,12 +413,12 @@ void mix_up(const float *h, const QArrays &w_up, const void *x, const float *nor
 }  // namespace
 
 void hc_mix_down(const void *x, const Q4DeviceView &w, int64_t T, int64_t H, int64_t d, int64_t r, bool inject,
-                 float eps, float *h, float *w_in, float *inv, Act act, hipStream_t stream) {
-    mix_down<4>(x, {w.q, w.scale, w.minv, w.N, w.K, w.G}, T, H, d, r, inject, eps, h, w_in, inv, act, stream);
+                 float eps, float *h, float *w_in, float *inv, Act act, hipStream_t stream, int ks_override) {
+    mix_down<4>(x, {w.q, w.scale, w.minv, w.N, w.K, w.G}, T, H, d, r, inject, eps, h, w_in, inv, act, stream, ks_override);
 }
 void hc_mix_down(const void *x, const Q8DeviceView &w, int64_t T, int64_t H, int64_t d, int64_t r, bool inject,
-                 float eps, float *h, float *w_in, float *inv, Act act, hipStream_t stream) {
-    mix_down<8>(x, {w.q, w.scale, w.minv, w.N, w.K, w.G}, T, H, d, r, inject, eps, h, w_in, inv, act, stream);
+                 float eps, float *h, float *w_in, float *inv, Act act, hipStream_t stream, int ks_override) {
+    mix_down<8>(x, {w.q, w.scale, w.minv, w.N, w.K, w.G}, T, H, d, r, inject, eps, h, w_in, inv, act, stream, ks_override);
 }
 
 void hc_mix_up(const float *h, const Q4ChunkMajorView &w, const void *x, const float *norm_w, const float *inv,
