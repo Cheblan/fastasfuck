@@ -42,8 +42,6 @@ size_t ngram_read_threads();
 
 class NgramTableRows : public NgramRowSource {
 public:
-    // cache_rows: rows kept in the LRU cache (0: no cache), row_dim BF16 values each (320 B for the shipping table:
-    // the default 2^18 rows are ~84 MB).
     static constexpr int64_t kDefaultCacheRows = 1 << 18;
     explicit NgramTableRows(const std::string &path, int64_t cache_rows = kDefaultCacheRows);
     const PleHashParams &hash_params() const override { return file_.info().params; }
@@ -51,9 +49,8 @@ public:
     void gather(const int64_t *rows, int64_t n, uint16_t *out) const override;
     void prefetch(const int64_t *rows, int64_t n) const override;
     int64_t cache_rows() const;
-    // RAM per cache row: the row's BF16 values + its slot's LRU links and index entry (an unordered_map node and
-    // bucket, ~40 B - estimated, not measured).
-    uint64_t cache_bytes_per_row() const { return (uint64_t)row_dim() * 2 + 24 + 40; }
+    // RAM per cache row: row_bytes (162 B for Q8Row) + slot_row_ (4 B) + clock_ref_ (1 B) + table overhead (24 B).
+    uint64_t cache_bytes_per_row() const { return (uint64_t)file_.info().row_bytes() + 4 + 1 + 24; }
     // Empties the cache and reallocates it at `rows` (0..2^26), freeing the old arrays - the startup memory plan's
     // shrink (serve/memory_plan.hpp). Thread-safe; gathers meanwhile wait.
     void resize_cache(int64_t rows) const;
@@ -71,23 +68,37 @@ public:
     void drop_page_cache() const;
 
 private:
+    struct TableEntry {
+        uint32_t row;
+        int32_t slot;
+    };
+    static constexpr uint32_t kEmptyRow = UINT32_MAX;
+
+    static inline uint32_t fmix32(uint32_t h) {
+        h ^= h >> 16;
+        h *= 0x7feb352du;
+        h ^= h >> 15;
+        h *= 0x846ca68bu;
+        h ^= h >> 16;
+        return h;
+    }
+
     NgramTableFile file_;
-    mutable int64_t cap_;  // under mu_ (resize_cache)
-    // LRU over cap_ slots: slot -> row id, doubly linked most- to least-recent.
+    mutable int64_t cap_ = 0;  // under mu_ (resize_cache)
     mutable std::mutex mu_;
-    mutable std::unordered_map<int64_t, int32_t> where_;
-    mutable std::vector<int64_t> slot_row_;
-    mutable std::vector<int32_t> prev_, next_;
-    mutable std::vector<uint16_t> data_;
-    mutable int32_t head_ = -1, tail_ = -1, used_ = 0;
+    mutable std::vector<TableEntry> table_;
+    mutable uint32_t table_mask_ = 0;
+    mutable std::vector<uint32_t> slot_row_;
+    mutable std::vector<uint8_t> clock_ref_;
+    mutable std::vector<uint8_t> data_;  // raw file row bytes (e.g. 162 B for Q8Row)
+    mutable int32_t clock_hand_ = 0, used_ = 0;
     mutable Stats stats_;
-    void touch(int32_t slot) const;
-    // Sorted distinct ids of rows [n] (validated). fill: the cached ones copied to buf [uniq, row_dim] and touched
-    // (under mu_), the missing ones read from the file into buf without the lock, then added to the cache (under
-    // mu_; a row another caller added meanwhile is kept). Returns how many were read from the file.
+
+    int32_t find_slot(uint32_t row) const;
+    void table_insert(uint32_t row, int32_t slot) const;
+    void table_erase(uint32_t row) const;
+    int32_t take_slot(uint32_t row) const;
     std::vector<int64_t> unique_rows(const int64_t *rows, int64_t n, const char *fn) const;
-    size_t fill(const std::vector<int64_t> &uniq, uint16_t *buf) const;
-    int32_t take_slot(int64_t row) const;
 };
 
 }  // namespace strix

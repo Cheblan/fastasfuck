@@ -167,14 +167,19 @@ void ngram_decode_row(const NgramTableInfo &info, const uint8_t *in, uint16_t *b
     const int64_t D = info.row_dim;
     switch (info.dtype) {
     case NgramDtype::BF16: std::memcpy(bf16, in, (size_t)D * 2); return;
-    case NgramDtype::FP8E4M3:
-        for (int64_t k = 0; k < D; ++k) bf16[k] = f32_to_bf16(e4m3_to_f32(in[k]) * info.fp8_scale);
+    case NgramDtype::FP8E4M3: {
+        const uint8_t * __restrict__ src = in;
+        uint16_t * __restrict__ dst = bf16;
+        for (int64_t k = 0; k < D; ++k) dst[k] = f32_to_bf16(e4m3_to_f32(src[k]) * info.fp8_scale);
         return;
+    }
     case NgramDtype::Q8Row: {
         uint16_t sb;
         std::memcpy(&sb, in, 2);
         const float s = bf16_to_f32(sb);
-        for (int64_t k = 0; k < D; ++k) bf16[k] = f32_to_bf16((float)(int8_t)in[2 + k] * s);
+        const uint8_t * __restrict__ src = in + 2;
+        uint16_t * __restrict__ dst = bf16;
+        for (int64_t k = 0; k < D; ++k) dst[k] = f32_to_bf16((float)(int8_t)src[k] * s);
         return;
     }
     }

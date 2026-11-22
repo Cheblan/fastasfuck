@@ -127,129 +127,235 @@ void parallel_rows(size_t n, size_t max_threads, const std::function<void(size_t
     ReadPool::get().run(n, std::min(max_threads, n) - 1, fetch);
 }
 
-NgramTableRows::NgramTableRows(const std::string &path, int64_t cache_rows) : file_(path), cap_(cache_rows) {
+NgramTableRows::NgramTableRows(const std::string &path, int64_t cache_rows) : file_(path), cap_(0) {
     STRIX_CHECK(cache_rows >= 0 && cache_rows <= (1ll << 26), "NgramTableRows: cache_rows = ", cache_rows,
-                ", expected 0..2^26");
-    check_ple_hash_params(file_.info().params);
-    slot_row_.resize((size_t)cap_), prev_.resize((size_t)cap_), next_.resize((size_t)cap_);
-    data_.resize((size_t)(cap_ * file_.info().row_dim));
-    where_.reserve((size_t)cap_);
+                ", expected 0..2^26 (up to ", 1ll << 26, " rows)");
+    STRIX_CHECK(file_.info().rows < (int64_t)UINT32_MAX, "NgramTableRows: rows = ", file_.info().rows,
+                " exceeds uint32_t limit (", (uint64_t)UINT32_MAX, ")");
+    resize_cache(cache_rows);
 }
 
-void NgramTableRows::touch(int32_t s) const {  // move slot s to the front (most recent)
-    if (head_ == s) return;
-    if (prev_[(size_t)s] >= 0) next_[(size_t)prev_[(size_t)s]] = next_[(size_t)s];
-    if (next_[(size_t)s] >= 0) prev_[(size_t)next_[(size_t)s]] = prev_[(size_t)s];
-    if (tail_ == s) tail_ = prev_[(size_t)s];
-    prev_[(size_t)s] = -1, next_[(size_t)s] = head_;
-    if (head_ >= 0) prev_[(size_t)head_] = s;
-    head_ = s;
-    if (tail_ < 0) tail_ = s;
-}
-
-int32_t NgramTableRows::take_slot(int64_t row) const {  // a free slot, else the least recent one, now holding row
-    int32_t s;
-    if (used_ < cap_) {
-        s = used_++;
-        prev_[(size_t)s] = next_[(size_t)s] = -1;
-    } else {
-        s = tail_;
-        where_.erase(slot_row_[(size_t)s]);
+int32_t NgramTableRows::find_slot(uint32_t row) const {
+    if (table_.empty()) return -1;
+    uint32_t idx = fmix32(row) & table_mask_;
+    for (;;) {
+        const TableEntry &e = table_[idx];
+        if (e.row == kEmptyRow) return -1;
+        if (e.row == row) return e.slot;
+        idx = (idx + 1) & table_mask_;
     }
-    slot_row_[(size_t)s] = row;
-    where_[row] = s;
-    touch(s);
-    return s;
+}
+
+void NgramTableRows::table_insert(uint32_t row, int32_t slot) const {
+    uint32_t idx = fmix32(row) & table_mask_;
+    for (;;) {
+        TableEntry &e = table_[idx];
+        if (e.row == kEmptyRow) {
+            e.row = row;
+            e.slot = slot;
+            return;
+        }
+        if (e.row == row) {
+            e.slot = slot;
+            return;
+        }
+        idx = (idx + 1) & table_mask_;
+    }
+}
+
+void NgramTableRows::table_erase(uint32_t row) const {
+    if (table_.empty()) return;
+    uint32_t idx = fmix32(row) & table_mask_;
+    for (;;) {
+        if (table_[idx].row == kEmptyRow) return;  // not found
+        if (table_[idx].row == row) break;
+        idx = (idx + 1) & table_mask_;
+    }
+    uint32_t curr = idx;
+    uint32_t next = (curr + 1) & table_mask_;
+    for (;;) {
+        if (table_[next].row == kEmptyRow) {
+            table_[curr].row = kEmptyRow;
+            table_[curr].slot = -1;
+            return;
+        }
+        uint32_t natural = fmix32(table_[next].row) & table_mask_;
+        if (((curr - natural) & table_mask_) < ((next - natural) & table_mask_)) {
+            table_[curr] = table_[next];
+            curr = next;
+        }
+        next = (next + 1) & table_mask_;
+    }
+}
+
+int32_t NgramTableRows::take_slot(uint32_t row) const {
+    if (used_ < cap_) {
+        int32_t s = used_++;
+        slot_row_[(size_t)s] = row;
+        clock_ref_[(size_t)s] = 1;
+        table_insert(row, s);
+        return s;
+    }
+    for (;;) {
+        int32_t s = clock_hand_;
+        clock_hand_ = (clock_hand_ + 1 == cap_) ? 0 : clock_hand_ + 1;
+        if (clock_ref_[(size_t)s] == 0) {
+            uint32_t old_row = slot_row_[(size_t)s];
+            table_erase(old_row);
+            slot_row_[(size_t)s] = row;
+            clock_ref_[(size_t)s] = 1;
+            table_insert(row, s);
+            return s;
+        }
+        clock_ref_[(size_t)s] = 0;
+    }
 }
 
 std::vector<int64_t> NgramTableRows::unique_rows(const int64_t *rows, int64_t n, const char *fn) const {
     STRIX_CHECK(rows || n == 0, "NgramTableRows::", fn, ": null rows with n = ", n);
     STRIX_CHECK(n >= 0, "NgramTableRows::", fn, ": n = ", n);
     const NgramTableInfo &info = file_.info();
-    for (int64_t i = 0; i < n; ++i)
-        STRIX_CHECK(rows[i] >= 0 && rows[i] < info.rows, "NgramTableRows::", fn, ": row id ", rows[i], " (entry ", i,
-                    ") outside the table's ", info.rows, " rows");
     std::vector<int64_t> uniq(rows, rows + n);
+    for (int64_t r : uniq)
+        STRIX_CHECK(r >= 0 && r < info.rows, "NgramTableRows::", fn, ": row id ", r, " outside the table's 0..",
+                    info.rows - 1);
     std::sort(uniq.begin(), uniq.end());
     uniq.erase(std::unique(uniq.begin(), uniq.end()), uniq.end());
     return uniq;
 }
 
-size_t NgramTableRows::fill(const std::vector<int64_t> &uniq, uint16_t *buf) const {
-    const NgramTableInfo &info = file_.info();
-    const size_t D = (size_t)info.row_dim, rb = info.row_bytes(), vb = D * 2;  // stored / decoded (BF16) row bytes
-    std::vector<size_t> miss;
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        for (size_t u = 0; u < uniq.size(); ++u) {
-            auto it = cap_ > 0 ? where_.find(uniq[u]) : where_.end();
-            if (it == where_.end()) {
-                miss.push_back(u);
-                continue;
-            }
-            std::memcpy(buf + u * D, data_.data() + (size_t)it->second * D, vb);
-            touch(it->second);
-        }
-    }
-    // The reads run without the lock: a gather doesn't wait behind a prefetch's reads (or the other way round).
-    parallel_rows(miss.size(), kReadThreads, [&](size_t m) {
-        const size_t u = miss[m];
-        thread_local std::vector<uint8_t> raw;
-        raw.resize(rb);
-        uint8_t *p = raw.data();
-        uint64_t at = kNgramTableDataOffset + (uint64_t)uniq[u] * rb;
-        size_t left = rb;
-        while (left > 0) {
-            const ssize_t got = ::pread(file_.fd(), p, left, (off_t)at);
-            if (got < 0 && errno == EINTR) continue;
-            STRIX_CHECK(got > 0, "NgramTableRows: read of row ", uniq[u], " from '", file_.path(), "' failed: ",
-                        got < 0 ? std::strerror(errno) : "end of file");
-            p += got, left -= (size_t)got, at += (uint64_t)got;
-        }
-        ngram_decode_row(info, raw.data(), buf + u * D);  // the cache and the forward see BF16
-    });
-    if (!miss.empty()) {
-        std::lock_guard<std::mutex> lock(mu_);
-        for (size_t u = 0, k = 0; cap_ > 0 && k < miss.size(); ++k) {  // (cap_ under the lock: resize_cache)
-            u = miss[k];
-            auto it = where_.find(uniq[u]);  // another gather / prefetch may have read it meanwhile
-            if (it != where_.end()) touch(it->second);
-            else std::memcpy(data_.data() + (size_t)take_slot(uniq[u]) * D, buf + u * D, vb);
-        }
-    }
-    return miss.size();
-}
-
 void NgramTableRows::gather(const int64_t *rows, int64_t n, uint16_t *out) const {
     STRIX_CHECK(out || n == 0, "NgramTableRows::gather: null out with n = ", n);
     const std::vector<int64_t> uniq = unique_rows(rows, n, "gather");
-    const size_t D = (size_t)file_.info().row_dim, vb = D * 2;
-    std::vector<uint16_t> buf(uniq.size() * D);
-    const size_t reads = fill(uniq, buf.data());
+    const size_t D = (size_t)file_.info().row_dim;
+    const size_t rb = (size_t)file_.info().row_bytes();
+    if (uniq.empty()) return;
+
+    std::vector<uint8_t> raw_uniq(uniq.size() * rb);
+    std::vector<size_t> miss;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        stats_.requested += (uint64_t)n, stats_.unique += uniq.size(), stats_.hits += uniq.size() - reads;
-        stats_.reads += reads;
+        stats_.requested += (uint64_t)n;
+        stats_.unique += uniq.size();
+        for (size_t u = 0; u < uniq.size(); ++u) {
+            int32_t s = cap_ > 0 ? find_slot((uint32_t)uniq[u]) : -1;
+            if (s < 0) {
+                miss.push_back(u);
+            } else {
+                std::memcpy(raw_uniq.data() + u * rb, data_.data() + (size_t)s * rb, rb);
+                clock_ref_[(size_t)s] = 1;
+            }
+        }
+        stats_.hits += uniq.size() - miss.size();
+        stats_.reads += miss.size();
     }
+
+    if (!miss.empty()) {
+        const size_t kReadThreads = ngram_read_threads();
+        parallel_rows(miss.size(), kReadThreads, [&](size_t m) {
+            const size_t u = miss[m];
+            uint8_t *p = raw_uniq.data() + u * rb;
+            uint64_t at = kNgramTableDataOffset + (uint64_t)uniq[u] * rb;
+            size_t left = rb;
+            while (left > 0) {
+                const ssize_t got = ::pread(file_.fd(), p, left, (off_t)at);
+                if (got < 0 && errno == EINTR) continue;
+                STRIX_CHECK(got > 0, "NgramTableRows: read of row ", uniq[u], " from '", file_.path(),
+                            "' failed: ", got < 0 ? std::strerror(errno) : "end of file");
+                p += got, left -= (size_t)got, at += (uint64_t)got;
+            }
+        });
+        if (cap_ > 0) {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (cap_ > 0) {
+                for (size_t m = 0; m < miss.size(); ++m) {
+                    const size_t u = miss[m];
+                    uint32_t r = (uint32_t)uniq[u];
+                    int32_t s = find_slot(r);
+                    if (s >= 0) {
+                        clock_ref_[(size_t)s] = 1;
+                    } else {
+                        int32_t ns = take_slot(r);
+                        std::memcpy(data_.data() + (size_t)ns * rb, raw_uniq.data() + u * rb, rb);
+                    }
+                }
+            }
+        }
+    }
+
+    // Decode directly outside of lock
+    std::vector<uint16_t> decoded_uniq(uniq.size() * D);
+    for (size_t u = 0; u < uniq.size(); ++u) {
+        ngram_decode_row(file_.info(), raw_uniq.data() + u * rb, decoded_uniq.data() + u * D);
+    }
+    const size_t vb = D * 2;
     for (int64_t i = 0; i < n; ++i) {
         const size_t u = (size_t)(std::lower_bound(uniq.begin(), uniq.end(), rows[i]) - uniq.begin());
-        std::memcpy(out + i * (int64_t)D, buf.data() + u * D, vb);
+        std::memcpy(out + i * (int64_t)D, decoded_uniq.data() + u * D, vb);
     }
 }
 
 void NgramTableRows::prefetch(const int64_t *rows, int64_t n) const {
     const std::vector<int64_t> uniq = unique_rows(rows, n, "prefetch");
-    if (cap_ == 0 || uniq.empty()) return;  // nowhere to keep them: the gather reads them as always
-    std::vector<uint16_t> buf(uniq.size() * (size_t)file_.info().row_dim);
-    const size_t reads = fill(uniq, buf.data());
-    std::lock_guard<std::mutex> lock(mu_);
-    stats_.prefetched += reads;
+    if (cap_ == 0 || uniq.empty()) return;
+    const size_t rb = (size_t)file_.info().row_bytes();
+
+    std::vector<size_t> miss;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (cap_ == 0) return;
+        for (size_t u = 0; u < uniq.size(); ++u) {
+            if (find_slot((uint32_t)uniq[u]) < 0) {
+                miss.push_back(u);
+            }
+        }
+    }
+    if (miss.empty()) return;
+
+    std::vector<uint8_t> raw_miss(miss.size() * rb);
+    const size_t kReadThreads = ngram_read_threads();
+    parallel_rows(miss.size(), kReadThreads, [&](size_t m) {
+        const size_t u = miss[m];
+        uint8_t *p = raw_miss.data() + m * rb;
+        uint64_t at = kNgramTableDataOffset + (uint64_t)uniq[u] * rb;
+        size_t left = rb;
+        while (left > 0) {
+            const ssize_t got = ::pread(file_.fd(), p, left, (off_t)at);
+            if (got < 0 && errno == EINTR) continue;
+            STRIX_CHECK(got > 0, "NgramTableRows: prefetch read of row ", uniq[u], " failed: ",
+                        got < 0 ? std::strerror(errno) : "end of file");
+            p += got, left -= (size_t)got, at += (uint64_t)got;
+        }
+    });
+
+    size_t inserted = 0;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (cap_ > 0) {
+            for (size_t m = 0; m < miss.size(); ++m) {
+                const size_t u = miss[m];
+                uint32_t r = (uint32_t)uniq[u];
+                if (find_slot(r) < 0) {
+                    int32_t s = take_slot(r);
+                    std::memcpy(data_.data() + (size_t)s * rb, raw_miss.data() + m * rb, rb);
+                    ++inserted;
+                }
+            }
+            stats_.prefetched += inserted;
+        }
+    }
 }
 
 void NgramTableRows::clear_cache() const {
     std::lock_guard<std::mutex> lock(mu_);
-    where_.clear();
-    head_ = tail_ = -1, used_ = 0;
+    for (auto &e : table_) {
+        e.row = kEmptyRow;
+        e.slot = -1;
+    }
+    std::fill(clock_ref_.begin(), clock_ref_.end(), 0);
+    std::fill(slot_row_.begin(), slot_row_.end(), kEmptyRow);
+    clock_hand_ = 0;
+    used_ = 0;
 }
 
 int64_t NgramTableRows::cache_rows() const {
@@ -260,15 +366,22 @@ int64_t NgramTableRows::cache_rows() const {
 void NgramTableRows::resize_cache(int64_t rows) const {
     STRIX_CHECK(rows >= 0 && rows <= (1ll << 26), "NgramTableRows::resize_cache: rows = ", rows, ", expected 0..2^26");
     std::lock_guard<std::mutex> lock(mu_);
-    // Swapped with fresh containers so the old memory is returned now (clear() / resize() keep the capacity).
-    std::unordered_map<int64_t, int32_t>().swap(where_);
-    std::vector<int64_t>((size_t)rows).swap(slot_row_);
-    std::vector<int32_t>((size_t)rows).swap(prev_);
-    std::vector<int32_t>((size_t)rows).swap(next_);
-    std::vector<uint16_t>((size_t)(rows * file_.info().row_dim)).swap(data_);
-    where_.reserve((size_t)rows);
+    const size_t rb = (size_t)file_.info().row_bytes();
     cap_ = rows;
-    head_ = tail_ = -1, used_ = 0;
+    used_ = 0;
+    clock_hand_ = 0;
+    std::vector<uint8_t>((size_t)(rows * rb)).swap(data_);
+    std::vector<uint32_t>((size_t)rows, kEmptyRow).swap(slot_row_);
+    std::vector<uint8_t>((size_t)rows, 0).swap(clock_ref_);
+    if (rows > 0) {
+        size_t ts = 16;
+        while (ts < (size_t)rows * 2) ts <<= 1;
+        table_mask_ = (uint32_t)(ts - 1);
+        std::vector<TableEntry>(ts, TableEntry{kEmptyRow, -1}).swap(table_);
+    } else {
+        table_mask_ = 0;
+        std::vector<TableEntry>().swap(table_);
+    }
 }
 
 void NgramTableRows::drop_page_cache() const {

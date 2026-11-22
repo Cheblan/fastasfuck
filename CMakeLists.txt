@@ -278,6 +278,9 @@ add_executable(breakdown_split tools/breakdown_split.cpp)
 target_link_libraries(breakdown_split PRIVATE strix_kernels strix_formats strix_runtime)
 
 add_executable(bench_threshold_gemv_vs_wmma tools/bench_threshold_gemv_vs_wmma.cpp)
+
+add_executable(test_ngram_cache tools/test_ngram_cache.cpp)
+target_link_libraries(test_ngram_cache PRIVATE strix_model strix_formats strix_runtime)
 target_link_libraries(bench_threshold_gemv_vs_wmma PRIVATE strix_kernels strix_formats strix_runtime)
 
 
