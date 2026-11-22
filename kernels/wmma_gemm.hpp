@@ -149,6 +149,39 @@ __device__ inline void wmma_q8_word_to_f16(uint32_t w, wmma_f16x2 s, wmma_f16x2 
     out[1] = wmma_codes_to_f16x2(w, w, 0x0c030c02u, s, m);  // [b2, 0, b3, 0]
 }
 
+// Spread 4 pairs of high bits (even or odd codes: code 0 at bits 0..1, code 1 at bits 4..5, code 2 at bits 8..9,
+// code 3 at bits 12..13) into bits 4..5 of bytes 0..3 of a 32-bit word.
+__device__ inline uint32_t q6_hi_spread(uint32_t h) {
+    return ((h & 0x0003u) << 4) |
+           ((h & 0x0030u) << 8) |
+           ((h & 0x0300u) << 12) |
+           ((h & 0x3000u) << 16);
+}
+
+// The 8 Q6 codes of one word (low nibbles in w, high bits in h: bits 2i..2i+1 for code i) as 4 F16 pairs into out[0..3].
+__device__ inline void wmma_q6_word_to_f16(uint32_t w, uint32_t h, wmma_f16x2 s, wmma_f16x2 m, uint32_t *out) {
+    const uint32_t lo = (w & 0x0F0F0F0Fu) | q6_hi_spread(h);
+    const uint32_t hi = ((w >> 4) & 0x0F0F0F0Fu) | q6_hi_spread(h >> 2);
+#pragma unroll
+    for (int j = 0; j < 4; ++j)
+        out[j] = wmma_codes_to_f16x2(hi, lo, (uint32_t)j | 0x0c00u | ((uint32_t)(4 + j) << 16) | 0x0c000000u, s, m);
+}
+
+// One 32-code load of Q6 codes (16 bytes low nibbles, 8 bytes high bits = 2 words, all in one group, scale sc / min mn as F16 pairs)
+// dequantized to F16 and written to LDS at dst (16-byte aligned) in K order.
+__device__ inline void wmma_stage_q6_f16(const uint4 &lo, const uint32_t (&hi)[2], wmma_f16x2 sc, wmma_f16x2 mn, uint16_t *dst) {
+    const uint32_t words[4] = {lo.x, lo.y, lo.z, lo.w};
+    const uint32_t hw[4] = {hi[0] & 0xFFFFu, hi[0] >> 16, hi[1] & 0xFFFFu, hi[1] >> 16};
+    uint32_t d[16];
+#pragma unroll
+    for (int w = 0; w < 4; ++w) {
+        wmma_q6_word_to_f16(words[w], hw[w], sc, mn, d + 4 * w);
+    }
+    uint4 *out = reinterpret_cast<uint4 *>(dst);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) out[j] = make_uint4(d[4 * j], d[4 * j + 1], d[4 * j + 2], d[4 * j + 3]);
+}
+
 // One 16-byte load of codes (BITS 4: 32 codes, 8: 16 - all in one group, scale sc / min mn as F16 pairs) dequantized
 // to F16 and written to LDS at dst (16-byte aligned) in K order.
 template <int BITS>
@@ -331,12 +364,26 @@ struct WmmaWCodesSplit {
 #pragma unroll
             for (int j = 0; j < 4; ++j) out[j] = make_uint4(d[4 * j], d[4 * j + 1], d[4 * j + 2], d[4 * j + 3]);
         }
+        stage_window(sw, mw);
+    }
+    __device__ void stage_window(uint16_t *sw, uint16_t *mw) const {
         if (win)
 #pragma unroll
             for (int i = 0; i < kWinLoads; ++i) {
                 const int e = (int)threadIdx.x + i * kWmmaThreads;
                 sw[e] = s[i], mw[e] = m[i];  // [r][e % kWin] with r = e / kWin
             }
+    }
+    __device__ void stage_f16(uint16_t *lds, const uint16_t *sw, const uint16_t *mw, int64_t k0) const {
+        static_assert(HB == 2, "F16 staging: Q6 weights");
+#pragma unroll
+        for (int i = 0; i < kLoads; ++i) {
+            const int l = (int)threadIdx.x + i * kWmmaThreads, r = l / kLoadsPerRow;
+            const int kin = (l % kLoadsPerRow) * kCodesPerLoad;
+            const int slot = (int)(((k0 + kin) / G) % kWin);
+            wmma_stage_q6_f16(lo[i], hi[i], wmma_bf16_bits_to_f16x2(sw[r * kWin + slot]),
+                              wmma_bf16_bits_to_f16x2(mw[r * kWin + slot]), lds + r * kWmmaLd + kin);
+        }
     }
 };
 

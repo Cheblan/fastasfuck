@@ -153,7 +153,7 @@ int main(int argc, char **argv) {
         Qwen4ExpSession session_q8(model_q8, num_eval_tokens + 128, num_eval_tokens + 128,
                                    PrefillMath::WmmaBf16, false, KvFormat::Q8, 1);
         PrecisionOptions prec;
-        prec.gdn = kernels::DrPrecision::Fast;
+        prec.gdn = kernels::DrPrecision::HalfU;
         prec.attention = kernels::AttnPrecision::Fast;
         session_q8.set_precision(prec);
 
@@ -209,7 +209,7 @@ int main(int argc, char **argv) {
         Qwen4ExpSession session_q6(model_q6, num_eval_tokens + 128, num_eval_tokens + 128,
                                    PrefillMath::WmmaBf16, false, KvFormat::Q8, 1);
         PrecisionOptions prec;
-        prec.gdn = kernels::DrPrecision::Fast;
+        prec.gdn = kernels::DrPrecision::HalfU;
         prec.attention = kernels::AttnPrecision::Fast;
         session_q6.set_precision(prec);
 
