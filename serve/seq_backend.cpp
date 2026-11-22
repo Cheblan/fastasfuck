@@ -194,7 +194,7 @@ bool GpuArbiter::lead_ready_locked(double now) const {
 }
 
 double GpuArbiter::batch_wait_locked() const {
-    if (!calls_waiting_.empty() || !prefill_waiting_.empty()) {
+    if (!calls_waiting_.empty()) {
         return kBatchWaitMinSeconds;
     }
     return std::clamp(0.35 * last_batch_seconds_, kBatchWaitMinSeconds, kBatchWaitMaxSeconds);
