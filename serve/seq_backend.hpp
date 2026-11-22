@@ -71,7 +71,7 @@ public:
     // How long a waiting verify holds its batch for a decoding seq that hasn't sent its own yet,
     // within [kBatchWaitMinSeconds, kBatchWaitMaxSeconds].
     static constexpr double kBatchWaitMinSeconds = 0.002, kBatchWaitMaxSeconds = 0.020;
-    static constexpr double kDraftWaitMaxSeconds = 0.0004;
+    static constexpr double kDraftWaitMaxSeconds = 0.0010;
     static constexpr int64_t kPrefillYieldBatches = 4;
     double batch_wait_locked() const;
 
@@ -79,6 +79,7 @@ public:
         int64_t verify_batches = 0, verify_runs = 0;  // batched verify forwards and the runs they carried
         int64_t max_runs = 0;                         // the most runs one batch carried
         int64_t verify_alone = 0;  // verifies run alone because their seq isn't batchable (image rows: mRoPE)
+        int64_t draft_batches = 0, draft_runs = 0;    // batched draft forwards and the runs they carried
     };
     Stats stats() const;
 

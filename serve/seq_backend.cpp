@@ -314,6 +314,8 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
         }
         fail_locked();
     } else {
+        ++stats_.draft_batches;
+        stats_.draft_runs += (int64_t)members.size();
         for (size_t i = 0; i < members.size(); ++i) {
             PendingDraft &d = pending_drafts_[members[i]];
             d.done = true;

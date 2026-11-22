@@ -549,6 +549,7 @@ struct EngineStats {
     // Per slot: the request it runs (0: idle), the tokens its state holds and its snapshot's position (-1: none).
     std::vector<int64_t> slot_request, slot_live_tokens, slot_snapshot_pos;
     int64_t verify_batches = 0, verify_batch_runs = 0;  // batched MTP verifies (GpuArbiter) and their runs
+    int64_t draft_batches = 0, draft_batch_runs = 0;    // batched MTP drafts (GpuArbiter) and their runs
     int64_t verify_alone = 0;  // verifies run alone: their conversation holds image rows (GpuArbiter Stats)
     int64_t decoding_slots = 0;  // slots in their decode loop (GpuArbiter::decoding_count; 0 with one slot)
     // Seconds since the last request finished (or the engine started); 0 while one runs or waits. `busy` alone reads
