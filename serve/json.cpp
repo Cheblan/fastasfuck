@@ -96,6 +96,13 @@ const Value *Value::find(std::string_view key) const {
     return nullptr;
 }
 
+Value *Value::find(std::string_view key) {
+    if (type_ != Type::Object) return nullptr;
+    for (auto &[k, v] : obj_)
+        if (k == key) return &v;
+    return nullptr;
+}
+
 Value &Value::push(Value v) {
     STRIX_CHECK(type_ == Type::Array, "json::Value::push on ", type_name(type_), ", expected an array");
     arr_.push_back(std::move(v));

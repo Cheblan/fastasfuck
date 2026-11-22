@@ -55,6 +55,7 @@ public:
 
     // Object lookup: nullptr if absent (or if this isn't an object).
     const Value *find(std::string_view key) const;
+    Value *find(std::string_view key);
     // Array / object building. push/set on the wrong type throw.
     Value &push(Value v);
     Value &set(std::string key, Value v);  // replaces an existing key in place

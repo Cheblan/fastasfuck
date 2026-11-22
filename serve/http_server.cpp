@@ -889,6 +889,21 @@ void HttpServer::routes() {
             std::shared_ptr<QueueSink> active_sink;
             std::thread worker;
             std::atomic<bool> closed{false};
+
+            void stop_worker() {
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    if (active_sink) active_sink->cancel();
+                }
+                if (worker.joinable()) {
+                    worker.join();
+                }
+            }
+
+            ~SessionState() {
+                closed = true;
+                stop_worker();
+            }
         };
         auto state = std::make_shared<SessionState>();
 
@@ -926,14 +941,8 @@ void HttpServer::routes() {
                 continue;
             }
 
-            // Before starting a new generation on this connection, join any previous worker
-            {
-                std::lock_guard<std::mutex> lk(state->mu);
-                if (state->active_sink) state->active_sink->cancel();
-            }
-            if (state->worker.joinable()) {
-                state->worker.join();
-            }
+            // Guaranteed cancel and join of previous worker before launching a new one
+            state->stop_worker();
 
             // Merge top-level body with nested "response" (if present) so flat and nested formats both work
             json::Value req_obj = body;
@@ -1032,7 +1041,7 @@ void HttpServer::routes() {
             state->worker = std::thread([this, &ws, state, sink, tools, resp_id, created_at, rr]() mutable {
                 int64_t seq = 0;
                 const auto send_ev = [&](const std::string &, const std::string &json_data) {
-                    if (!ws.send(json_data)) {
+                    if (state->closed.load() || !ws.send(json_data)) {
                         sink->cancel();
                         return false;
                     }
@@ -1242,13 +1251,7 @@ void HttpServer::routes() {
 
         // Connection closed: clean up active turn and wait for worker thread to exit
         state->closed = true;
-        {
-            std::lock_guard<std::mutex> lk(state->mu);
-            if (state->active_sink) state->active_sink->cancel();
-        }
-        if (state->worker.joinable()) {
-            state->worker.join();
-        }
+        state->stop_worker();
     });
 
     // Legacy completions: the raw prompt as is - no chat template, no

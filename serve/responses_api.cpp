@@ -195,14 +195,25 @@ ResponsesRequest parse_responses_request(const json::Value &body, const Sampling
             } else if (type == "function_call") {
                 ResponsesInputItem item;
                 item.kind = ResponsesInputItem::Kind::FunctionCall;
-                if (const json::Value *cid = find_field(val, "call_id")) item.call_id = get_str(*cid, "call_id");
+                if (const json::Value *cid = find_field(val, "call_id"); cid && cid->is_string()) {
+                    item.call_id = cid->as_string("call_id");
+                } else if (const json::Value *id = find_field(val, "id"); id && id->is_string()) {
+                    item.call_id = id->as_string("id");
+                }
                 if (const json::Value *nm = find_field(val, "name")) item.name = get_str(*nm, "name");
-                if (const json::Value *arg = find_field(val, "arguments")) item.arguments = get_str(*arg, "arguments");
+                if (const json::Value *arg = find_field(val, "arguments")) {
+                    if (arg->is_string()) item.arguments = arg->as_string("arguments");
+                    else if (arg->is_object()) item.arguments = arg->dump();
+                }
                 r.input_items.push_back(std::move(item));
             } else if (type == "function_call_output") {
                 ResponsesInputItem item;
                 item.kind = ResponsesInputItem::Kind::FunctionCallOutput;
-                if (const json::Value *cid = find_field(val, "call_id")) item.call_id = get_str(*cid, "call_id");
+                if (const json::Value *cid = find_field(val, "call_id"); cid && cid->is_string()) {
+                    item.call_id = cid->as_string("call_id");
+                } else if (const json::Value *id = find_field(val, "id"); id && id->is_string()) {
+                    item.call_id = id->as_string("id");
+                }
                 if (const json::Value *out = find_field(val, "output")) {
                     if (out->is_string()) {
                         item.output = out->as_string("output");
@@ -217,6 +228,9 @@ ResponsesRequest parse_responses_request(const json::Value &body, const Sampling
                     }
                 }
                 r.input_items.push_back(std::move(item));
+            } else if (type == "reasoning") {
+                // OpenAI Responses API reasoning items from prior turns: safely ignore
+                continue;
             }
         }
     } else {
@@ -238,11 +252,12 @@ std::vector<int32_t> build_responses_prompt(
     if (req.previous_response_id.empty()) {
         // Cold session: render full prompt from scratch
         json::Value messages = json::Value::array();
+        std::vector<json::Value> msg_list;
         if (req.instructions.has_value() && !req.instructions->empty()) {
             json::Value sys = json::Value::object();
             sys.set("role", json::Value::string("system"));
             sys.set("content", json::Value::string(*req.instructions));
-            messages.push(std::move(sys));
+            msg_list.push_back(std::move(sys));
         }
 
         for (const auto &item : req.input_items) {
@@ -250,14 +265,51 @@ std::vector<int32_t> build_responses_prompt(
                 json::Value m = json::Value::object();
                 m.set("role", json::Value::string(item.role));
                 m.set("content", json::Value::string(item.content));
-                messages.push(std::move(m));
+                msg_list.push_back(std::move(m));
+            } else if (item.kind == ResponsesInputItem::Kind::FunctionCall) {
+                json::Value tc = json::Value::object();
+                tc.set("id", json::Value::string(item.call_id));
+                tc.set("type", json::Value::string("function"));
+                json::Value fn = json::Value::object();
+                fn.set("name", json::Value::string(item.name));
+                fn.set("arguments", json::Value::string(item.arguments));
+                tc.set("function", std::move(fn));
+
+                bool attached = false;
+                if (!msg_list.empty()) {
+                    auto *last_role = msg_list.back().find("role");
+                    if (last_role && last_role->as_string("role") == "assistant") {
+                        auto *calls = msg_list.back().find("tool_calls");
+                        if (calls && calls->is_array()) {
+                            calls->push(std::move(tc));
+                        } else {
+                            json::Value arr = json::Value::array();
+                            arr.push(std::move(tc));
+                            msg_list.back().set("tool_calls", std::move(arr));
+                        }
+                        attached = true;
+                    }
+                }
+                if (!attached) {
+                    json::Value asst = json::Value::object();
+                    asst.set("role", json::Value::string("assistant"));
+                    asst.set("content", json::Value::string(""));
+                    json::Value arr = json::Value::array();
+                    arr.push(std::move(tc));
+                    asst.set("tool_calls", std::move(arr));
+                    msg_list.push_back(std::move(asst));
+                }
             } else if (item.kind == ResponsesInputItem::Kind::FunctionCallOutput) {
                 json::Value m = json::Value::object();
                 m.set("role", json::Value::string("tool"));
                 m.set("content", json::Value::string(item.output));
                 m.set("tool_call_id", json::Value::string(item.call_id));
-                messages.push(std::move(m));
+                msg_list.push_back(std::move(m));
             }
+        }
+
+        for (auto &m : msg_list) {
+            messages.push(std::move(m));
         }
 
         const json::Value *tools_ptr = req.tools.is_array() && !req.tools.as_array("tools").empty() ? &req.tools : nullptr;
