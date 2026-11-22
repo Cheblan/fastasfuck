@@ -439,18 +439,24 @@ int run(int argc, char **argv) {
                 }
 
                 // 3. Calibrate verify latencies for T = 1..8
+                // Use diverse tokens from realistic text/code to activate representative unique MoE experts across layers
+                static const int32_t kCalibTokens[8] = {1532, 9481, 32114, 843, 19283, 4412, 27150, 6819};
                 std::vector<float> verify_grid = {0.0f};
                 for (int k = 1; k <= 8; ++k) {
-                    std::vector<int32_t> test_ids(k, 100);
+                    std::vector<int32_t> test_ids(kCalibTokens, kCalibTokens + k);
                     std::vector<float> k_times;
-                    for (int t = 0; t < 3; ++t) {
+                    for (int t = 0; t < 5; ++t) {
                         const auto t0 = std::chrono::steady_clock::now();
                         backend.forward_verify(test_ids, 1);
                         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                         backend.drop_verify();
                         k_times.push_back((float)ms);
                     }
-                    verify_grid.push_back(compute_median(k_times));
+                    float v_med = compute_median(k_times);
+                    if (k > 1 && v_med <= verify_grid.back()) {
+                        v_med = verify_grid.back() + 1.0f; // physical monotonicity constraint
+                    }
+                    verify_grid.push_back(v_med);
                 }
                 backend.reset();
 
