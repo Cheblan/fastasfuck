@@ -855,10 +855,16 @@ void HttpServer::routes() {
                         output_index++;
                     }
 
-                    if (!r.tokens.empty()) {
+                    std::vector<int32_t> tokens_to_save = r.tokens;
+                    if (tokens_to_save.empty() && !rr.previous_response_id.empty()) {
+                        if (auto prev = response_store_.get(rr.previous_response_id)) {
+                            tokens_to_save = prev->tokens;
+                        }
+                    }
+                    if (!tokens_to_save.empty()) {
                         response_store_.put({
                             resp_id,
-                            r.tokens,
+                            std::move(tokens_to_save),
                             rr.instructions,
                             rr.tools,
                             compute_responses_config_hash(rr.instructions, rr.tools),
@@ -1220,10 +1226,16 @@ void HttpServer::routes() {
                             output_index++;
                         }
 
-                        if (!r.tokens.empty()) {
+                        std::vector<int32_t> tokens_to_save = r.tokens;
+                        if (tokens_to_save.empty() && !rr.previous_response_id.empty()) {
+                            if (auto prev = response_store_.get(rr.previous_response_id)) {
+                                tokens_to_save = prev->tokens;
+                            }
+                        }
+                        if (!tokens_to_save.empty()) {
                             response_store_.put({
                                 resp_id,
-                                r.tokens,
+                                std::move(tokens_to_save),
                                 rr.instructions,
                                 rr.tools,
                                 compute_responses_config_hash(rr.instructions, rr.tools),

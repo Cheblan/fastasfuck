@@ -171,7 +171,7 @@ curl -s localhost:5300/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Point any OpenAI-compatible client at `http://<your-machine>:5300/v1`, model `qwen3.8-flash-next` (aliases like `gpt-4o`, `o1` are supported via `model-aliases`).
+Point any OpenAI-compatible client at `http://<your-machine>:5300/v1`, model `qwen3.8-flash-next` (optional aliases can be configured via `model-aliases`).
 
 ### OpenAI Responses API (HTTP & WebSocket)
 strixite natively supports the OpenAI Responses API (`/v1/responses`) over both HTTP (JSON/SSE) and WebSocket for low-latency coding agents like **Codex CLI** and **OpenCode 2**:

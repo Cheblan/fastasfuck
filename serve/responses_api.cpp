@@ -400,6 +400,9 @@ std::string response_created_event(int64_t seq, const std::string &resp_id, cons
     r.set("status", json::Value::string("in_progress"));
     r.set("model", json::Value::string(model));
     r.set("created_at", json::Value::integer(created_at));
+    r.set("output", json::Value::array());
+    r.set("error", json::Value::null());
+    r.set("incomplete_details", json::Value::null());
     json::Value b = json::Value::object();
     b.set("response", std::move(r));
     return response_event_frame(seq, "response.created", std::move(b));
@@ -412,6 +415,9 @@ std::string response_in_progress_event(int64_t seq, const std::string &resp_id, 
     r.set("status", json::Value::string("in_progress"));
     r.set("model", json::Value::string(model));
     r.set("created_at", json::Value::integer(created_at));
+    r.set("output", json::Value::array());
+    r.set("error", json::Value::null());
+    r.set("incomplete_details", json::Value::null());
     json::Value b = json::Value::object();
     b.set("response", std::move(r));
     return response_event_frame(seq, "response.in_progress", std::move(b));
@@ -538,6 +544,15 @@ std::string response_completed_event(
     r.set("created_at", json::Value::integer(created_at));
     r.set("output", output_items);
     r.set("usage", std::move(u));
+    r.set("error", json::Value::null());
+    if (incomplete) {
+        json::Value inc = json::Value::object();
+        std::string reason = (res.finish_reason == "length") ? "max_output_tokens" : "cancelled";
+        inc.set("reason", json::Value::string(reason));
+        r.set("incomplete_details", std::move(inc));
+    } else {
+        r.set("incomplete_details", json::Value::null());
+    }
 
     json::Value b = json::Value::object();
     b.set("response", std::move(r));
@@ -565,6 +580,15 @@ std::string response_non_stream_body(
     r.set("created_at", json::Value::integer(created_at));
     r.set("output", output_items);
     r.set("usage", std::move(u));
+    r.set("error", json::Value::null());
+    if (incomplete) {
+        json::Value inc = json::Value::object();
+        std::string reason = (res.finish_reason == "length") ? "max_output_tokens" : "cancelled";
+        inc.set("reason", json::Value::string(reason));
+        r.set("incomplete_details", std::move(inc));
+    } else {
+        r.set("incomplete_details", json::Value::null());
+    }
     return r.dump();
 }
 
