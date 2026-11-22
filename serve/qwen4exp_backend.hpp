@@ -40,7 +40,8 @@ public:
     std::vector<float> forward(const std::vector<int32_t> &ids, bool want_logits) override {
         return session_->forward(ids, want_logits ? 1 : 0);
     }
-    void set_lookahead(const std::vector<int32_t> &next_ids) override { session_->set_lookahead(next_ids); }
+    void set_lookahead(const std::vector<int32_t> &next_ids) override { session_->set_lookahead(0, next_ids); }
+    void set_lookahead(int seq, const std::vector<int32_t> &next_ids) override { session_->set_lookahead(seq, next_ids); }
     std::vector<float> forward(const std::vector<int32_t> &ids, int64_t n_logits) override {
         return session_->forward(ids, n_logits);
     }

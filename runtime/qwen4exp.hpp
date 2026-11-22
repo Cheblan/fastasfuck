@@ -485,6 +485,7 @@ struct Qwen4ExpSeqState {
     Qwen4ExpSeqState(const Qwen4ExpSeqState &) = delete;
     Qwen4ExpSeqState &operator=(const Qwen4ExpSeqState &) = delete;
 
+    int seq = 0;
     int64_t pos = 0;
     // Where the last import_state ended (-1: none since reset): a delta import needs its base's import just
     // before - and pos still there (any forward moves it; restores need snapshots, which an import invalidates).
@@ -878,7 +879,8 @@ public:
     // PLE n-gram rows from the table on a worker thread during its own GPU work (after its PLE layer), and the one
     // after uses them - if its ids and n-gram history match exactly (anything else, e.g. a reset or restore in
     // between, just gathers anew). Applies to the next forward() only; empty clears it. 0..max_tokens() ids.
-    void set_lookahead(std::vector<int32_t> next_ids);
+    void set_lookahead(std::vector<int32_t> next_ids) { set_lookahead(0, std::move(next_ids)); }
+    void set_lookahead(int seq, std::vector<int32_t> next_ids);
     bool has_mtp() const { return mtp_; }
     // The MTP head's logits [vocab] FP32 for the token at pos() - the one the last forward's logits chose - i.e.
     // its draft of the token at pos() + 1. Doesn't advance pos() or change the
@@ -1077,6 +1079,7 @@ private:
     // first.
     PinnedHostBuffer ple_host_[2];
     struct PleGather {
+        int seq = -1;
         bool active = false;
         std::vector<int32_t> ids;  // the tokens gathered for
         PleHistory hist;           // the n-gram history before them
@@ -1084,7 +1087,8 @@ private:
         std::future<void> done;    // get() rethrows a gather failure
     };
     PleGather ple_pending_;              // started for set_lookahead's ids
-    std::vector<int32_t> ple_lookahead_;  // set_lookahead's ids, for the next forward to start gathering
+    std::mutex ple_lookahead_mu_;
+    std::vector<std::vector<int32_t>> ple_lookahead_;  // per-slot set_lookahead ids
     // Small forwards' gathers (decode, MTP verify) run on one persistent thread, started when the forward starts, so
     // they overlap the embedding and layer 0 on the GPU instead of stalling it at the PLE layer - without a thread
     // per token (std::async per token cost decode ~0.2 ms). Jobs run in order; the gathers go in one at a

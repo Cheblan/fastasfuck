@@ -691,9 +691,9 @@ Qwen4ExpDims qwen4exp_dims_from_file(const StrixwFile &f) {
 // and the parked-page region in one address range, so a parked conversation's pages can be mapped into another
 // slot without a copy - the hand-off is only correct inside one reservation on gfx1151.
 Qwen4ExpSeqState::Qwen4ExpSeqState(const Qwen4ExpModel &model, int64_t capacity, int64_t chain_rows, bool mtp,
-                                   KvFormat kv, int64_t slot, PrefillMath prefill_math) : mtp(mtp) {
+                                   KvFormat kv, int64_t slot, PrefillMath prefill_math)
+    : seq((int)slot), mtp(mtp) {
     (void)chain_rows;
-    (void)slot;
     (void)prefill_math;
     const Qwen4ExpDims &D = model.dims();
     const size_t e = es(model.act());
@@ -1104,6 +1104,7 @@ Qwen4ExpSession::Qwen4ExpSession(const Qwen4ExpModel &model, int64_t capacity, i
                                                             /*slot=*/k, prefill_math_));
     }
     slot_busy_.assign(seqs_.size(), 0);
+    ple_lookahead_.resize((size_t)n_slots);
     reset();
 }
 
@@ -1267,10 +1268,15 @@ void Qwen4ExpSession::drop_ple_pending() {
     ple_pending_ = PleGather{};
 }
 
-void Qwen4ExpSession::set_lookahead(std::vector<int32_t> next_ids) {
+void Qwen4ExpSession::set_lookahead(int seq, std::vector<int32_t> next_ids) {
     STRIX_CHECK((int64_t)next_ids.size() <= max_tokens_, "Qwen4ExpSession::set_lookahead: ", next_ids.size(),
                 " ids, expected 0..", max_tokens_);
-    ple_lookahead_ = std::move(next_ids);
+    std::lock_guard<std::mutex> lock(ple_lookahead_mu_);
+    if (seq >= 0 && (size_t)seq < ple_lookahead_.size()) {
+        ple_lookahead_[(size_t)seq] = std::move(next_ids);
+    } else if (seq < 0 && !ple_lookahead_.empty()) {
+        ple_lookahead_[0] = std::move(next_ids);
+    }
 }
 
 namespace {
@@ -1535,7 +1541,11 @@ void Qwen4ExpSession::reset() {
     }
     broken_ = false;
     mk_block_ = kernels::MropePos{}, mk_jobs_ = kernels::MropePos{};
-    ple_lookahead_.clear();  // a pending gather stays: the next forward's ids / history decide whether it's used
+    {
+        std::lock_guard<std::mutex> lock(ple_lookahead_mu_);
+        for (auto &v : ple_lookahead_) v.clear();
+    }
+    drop_ple_pending();
 }
 
 void Qwen4ExpSession::reset(int seq) {
@@ -1545,6 +1555,15 @@ void Qwen4ExpSession::reset(int seq) {
     STRIX_CHECK(!seqs_[(size_t)seq]->verify_pending, "Qwen4ExpSession::reset: seq ", seq,
                 " has a verify pending - resolve it first (the other runs of its batch share the forward)");
     STRIX_HIP_CHECK(hipStreamSynchronize(stream_), "Qwen4ExpSession::reset(seq)");
+    {
+        std::lock_guard<std::mutex> lock(ple_lookahead_mu_);
+        if (seq >= 0 && (size_t)seq < ple_lookahead_.size()) {
+            ple_lookahead_[(size_t)seq].clear();
+        }
+    }
+    if (ple_pending_.active && ple_pending_.seq == seq) {
+        drop_ple_pending();
+    }
     try {
         reset_seq_state(*seqs_[(size_t)seq]);
     } catch (...) {
@@ -2751,8 +2770,15 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
     // worker, so they overlap the GPU's embedding + layer 0 like today's.
     int ple_buf = 0;
     std::future<void> ple_ready;  // the forward's gather
-    std::vector<int32_t> lookahead = std::move(ple_lookahead_);
-    ple_lookahead_.clear();
+    std::vector<int32_t> lookahead;
+    if (runs.size() == 1) {
+        const int seq = runs[0].seq;
+        std::lock_guard<std::mutex> lock(ple_lookahead_mu_);
+        if (seq >= 0 && (size_t)seq < ple_lookahead_.size()) {
+            lookahead = std::move(ple_lookahead_[(size_t)seq]);
+            ple_lookahead_[(size_t)seq].clear();
+        }
+    }
     if (D.ple_layer >= 0) {
         if (runs.size() > 1) {
             // Multi-run forward: combine all runs' row IDs into one contiguous gather.
@@ -2776,7 +2802,8 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
             std::vector<int64_t> tok(rids.begin(), rids.end()), rows((size_t)(r.Tr * 16));
             const PleHistory before = sq.ple_hist;  // before the advance: what a pending gather was keyed on
             ple_ngram_ids(m_.ngram_rows().hash_params(), tok.data(), r.Tr, sq.ple_hist, rows.data());
-            if (ple_pending_.active && ple_pending_.ids == rids && ple_pending_.hist.prev == before.prev) {
+            if (ple_pending_.active && ple_pending_.seq == r.seq && ple_pending_.ids == rids &&
+                ple_pending_.hist.prev == before.prev) {
                 ple_buf = ple_pending_.buf, ple_ready = std::move(ple_pending_.done);
                 ple_pending_ = PleGather{};
             } else {
@@ -2844,14 +2871,17 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
             // buffer's last upload was in an earlier forward, which ended with a stream sync. The
             // look-ahead is the single-sequence serving path (the engine's); a multi-run batch drops the hint.
             if (runs.size() == 1 && !lookahead.empty()) {
+                drop_ple_pending();
                 std::vector<int64_t> tok(lookahead.begin(), lookahead.end()), rows(lookahead.size() * 16);
                 PleHistory h = runs[0].sq->ple_hist;
                 ple_ngram_ids(m_.ngram_rows().hash_params(), tok.data(), (int64_t)tok.size(), h, rows.data());
+                ple_pending_.seq = runs[0].seq;
                 ple_pending_.buf = 1 - ple_buf;
                 ple_pending_.done = start_ple_gather(std::move(rows), (int64_t)tok.size(),
                                                      ple_host_[ple_pending_.buf], PleRun::Async);
-                ple_pending_.ids = std::move(lookahead), ple_pending_.hist = runs[0].sq->ple_hist,
-                    ple_pending_.active = true;
+                ple_pending_.ids = std::move(lookahead);
+                ple_pending_.hist = runs[0].sq->ple_hist;
+                ple_pending_.active = true;
             }
             lin(ple_e_.get(), l.ple_kv, ple_kv_.get(), T, act);
             // The gate + conv per run: its rows out of the shared projection, its own conv state, and its own
