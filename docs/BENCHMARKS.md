@@ -39,6 +39,23 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 | **P6** | Agentic Engine Architecture & DRR Arbiter | 256 | 52.2 ± 0.6 | **60.89 ± 0.00** | **100.000% MATCH** (`1cbb83...`) |
 | **GRAND MEAN** | **All 6 Diverse Standardized Prompts** | — | **53.0 ms** | **73.78 tok/s** | **100.000% VERIFIED DETERMINISTIC** |
 
+### 2.1 MTP Vocabulary Filter: Universal `all` vs Localized `en+ru`
+
+The engine provides `--mtp-vocab-filter` to control the vocabulary coverage of the MTP draft head without affecting the full base model vocabulary:
+- **`--mtp-vocab-filter = all` (Default):** Retains all 248,320 vocabulary tokens in the draft head matrix (357.6 MB in Q4). Guarantees out-of-the-box drafting across all international languages, code, and symbols with steady ~2.11 ms draft latency.
+- **`--mtp-vocab-filter = en+ru` (Localized Optimization):** Prunes tokens outside English and Cyrillic Unicode blocks, retaining 160,904 tokens (64.8% of vocabulary, 231.7 MB matrix). Pruning drops draft latency by 25.6% (from 2.11 ms down to 1.57 ms), yielding a **+4.4% to +4.6% decode throughput speedup across all prompts**.
+- **Bit-Identity Invariant ($H_{all} \equiv H_{en+ru}$):** Because the base model verifier evaluates all draft proposals against the complete, unpruned vocabulary, filtering the draft head changes only speculative acceptance efficiency, never the greedy output sequence ($T = 0$). All 18 task pairs across all three model variants exhibited 100.000% exact SHA-256 bit identity ($H_{all} = H_{en+ru}$).
+
+| Task | Domain / Subject | Thinking-Cap (`all`) | Thinking-Cap (`en+ru`) | Swift 1.5 (`all`) | Swift 1.5 (`en+ru`) | Qwen Base (`all`) | Qwen Base (`en+ru`) | Bit-Identity Status |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **P1** | Concurrency / DAG | 82.80 tok/s | **86.71** (+4.7%) | 85.08 tok/s | **89.15** (+4.8%) | 80.45 tok/s | **83.77** (+4.1%) | **100.000% MATCH** |
+| **P2** | Riemann-Lebesgue | 85.83 tok/s | **89.62** (+4.4%) | 83.35 tok/s | **87.27** (+4.7%) | 88.00 tok/s | **91.89** (+4.4%) | **100.000% MATCH** |
+| **P3** | Linux Page Walk | 73.76 tok/s | **77.35** (+4.9%) | 62.48 tok/s | **65.17** (+4.3%) | 67.43 tok/s | **70.47** (+4.5%) | **100.000% MATCH** |
+| **P4** | Russian Translation | 65.14 tok/s | **67.92** (+4.3%) | 62.41 tok/s | **65.29** (+4.6%) | 67.86 tok/s | **70.69** (+4.2%) | **100.000% MATCH** |
+| **P5** | Tool Dispatch | 57.65 tok/s | **59.89** (+3.9%) | 60.01 tok/s | **62.82** (+4.7%) | 62.33 tok/s | **65.22** (+4.6%) | **100.000% MATCH** |
+| **P6** | DRR Arbiter | 58.64 tok/s | **60.85** (+3.8%) | 57.06 tok/s | **59.52** (+4.3%) | 55.19 tok/s | **57.96** (+5.0%) | **100.000% MATCH** |
+| **MEAN** | **Grand Mean** | **70.64 tok/s** | **73.72 tok/s** (+4.4%) | **68.40 tok/s** | **71.54 tok/s** (+4.6%) | **70.21 tok/s** | **73.34 tok/s** (+4.5%) | **100.000% VERIFIED** |
+
 ---
 
 ## 3. Table 2: Prefill Context Scaling (1 Slot)
