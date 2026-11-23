@@ -21,7 +21,7 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 
 ## 2. Table 1: Single-Stream (Solo) Performance & Determinism
 
-- **Execution Profile:** 1 Active Slot, Greedy Decoding ($T=0.0$, $\text{top\_p}=1.0$, $\text{top\_k}=1$, $\text{seed}=2281488$).
+- **Execution Profile:** 1 Active Slot, Greedy Decoding ($T=0.0$, `top_p = 1.0`, `top_k = 1`, `seed = 2281488`).
 - **Sterile Condition:** Prompt-cache snapshot substitution disabled (`prompt-cache = off`). Clean cold prefill on every run.
 - **Protocol:** $n=5$ consecutive measurement trials per prompt (+ 1 untimed hardware warmup ping).
 - **Determinism Standard:** Dynamic SHA-256 hash match across all 5 trials (no hardcoded hashes).
@@ -103,7 +103,7 @@ Sweeping candidate pairs under a 4-slot bimodal agent workload (3 slots decoding
 
 ### Physics of the Solo Quantum and Chunk Switching
 The maximum possible single-token latency pause during prefill transitions is strictly governed by the physical quantum duration:
-$$\text{Solo Quantum Latency} = \frac{\text{chunk}}{\text{solo\_prefill\_throughput}} + \text{decode\_step\_overhead}$$
+$$\text{Solo Quantum Latency} = \frac{\text{chunk}}{\text{Solo Prefill Throughput}} + \text{Step Overhead}$$
 
 - For `chunk = 1024`: $1024 / 1555 \approx 0.66\text{ s} \implies \text{Max ITL } \approx 750\text{ ms}$.
 - For `chunk = 2048`: $2048 / 1668 \approx 1.23\text{ s} \implies \text{Max ITL } \approx 1,320\text{ ms}$.
@@ -142,7 +142,7 @@ Comparative benchmark of quantum slicing configurations on AMD Strix Halo silico
 | **256** | **1D+3P** | 41.46 ± 2.12 | **707.6 ± 68.2** | 67.0 ms | 319.4 ms | 337.6 ms | **2310.2 ms** | **81.0 s** |
 
 ### Why `chunk-shared = 1024` Wins on MoE Silicon
-1. **MoE Routing Mathematics:** Qwen 3.8-Flash-Next employs 512 fine-grained experts with $\text{top-}k = 10$.
+1. **MoE Routing Mathematics:** Qwen 3.8-Flash-Next employs 512 fine-grained experts with top-k = 10.
    - At `chunk-shared = 256`: total token-expert dispatches $= 256 \times 10 = 2,560$. Across 512 experts, an average of only **$\approx 5$ tokens reach each expert** ($M=5$). GEMM matrix acceleration completely degenerates into a memory-bound bandwidth stall, cutting prefill throughput by **58.5%** and bloating turn makespan from 20s to 56s.
    - At `chunk-shared = 512`: $\approx 10$ tokens per expert. Prefill drops by 26–33% relative to 1024.
    - At `chunk-shared = 1024`: $\approx 20$ tokens per expert ($M=20$). Compute units are saturated, sustaining **913–1,151 tok/s** concurrent prefill.
@@ -171,6 +171,7 @@ On AMD Strix Halo, CPU and GPU share 128 GB Unified LPDDR5X DRAM on a 256-bit bu
 The engine natively supports incremental session state via `previous_response_id` over both HTTP and WebSocket (`ws://`):
 
 ```mermaid
+%%{init: {'sequence': {'mirrorActors': false}}}%%
 sequenceDiagram
     autonumber
     actor Client as Codex CLI / OpenCode 2
@@ -199,19 +200,19 @@ All benchmark scripts are version-controlled in `tools/bench/`:
 
 ```bash
 # 1. Solo Sterile Benchmark (1 slot, T=0.0, n=5, prompt-cache=off)
-python3 tools/bench/bench_solo_sterile.py --trials 5 --output docs/benchmark_solo_sterile_n5.json
+python3 tools/bench/bench_solo_sterile.py --trials 5 --output docs/benchmarks/1.0.0/benchmark_solo_sterile_n5.json
 
 # 2. Prefill Context Scaling Benchmark on C++ codebase (4k-128k)
-python3 tools/bench/bench_prefill_scaling.py --output docs/benchmark_prefill_scaling.json
+python3 tools/bench/bench_prefill_scaling.py --output docs/benchmarks/1.0.0/benchmark_prefill_scaling.json
 
 # 3. Multi-Slot Concurrency Benchmark (1, 2, 4 slots, T=0.6, n=3)
-python3 tools/bench/bench_multislot_scaling.py --trials 3 --output docs/benchmark_multislot_scaling.json
+python3 tools/bench/bench_multislot_scaling.py --trials 3 --output docs/benchmarks/1.0.0/benchmark_multislot_scaling.json
 
 # 4. Mixed Concurrency Isolation Benchmark (3D + 1P / 2D + 2P / 1D + 3P)
-python3 tools/bench/bench_mixed_concurrency.py --trials 3 --output docs/benchmark_mixed_concurrency.json
+python3 tools/bench/bench_mixed_concurrency.py --trials 3 --output docs/benchmarks/1.0.0/benchmark_mixed_4096_1024.json
 
 # 5. Chunk / Chunk-Shared 2-Phase Pareto Evaluation
-python3 tools/bench/bench_chunk_pareto.py --output docs/benchmark_chunk_pareto.json
+python3 tools/bench/bench_chunk_pareto.py --output docs/benchmarks/1.0.0/benchmark_chunk_pareto.json
 
 # 6. Mixed Concurrency Triad Automated Suite (1024, 512, 256)
 python3 tools/bench/run_mixed_triad.py

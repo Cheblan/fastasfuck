@@ -22,7 +22,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 SERVER_BIN = os.path.join(BASE_DIR, "build/strix/strix_server")
 CONFIG_FILE = "/home/cheblan/strix-server-hybrid.conf"
 BASE_URL = "http://127.0.0.1:5300"
-DOCS_DIR = os.path.join(BASE_DIR, "docs")
+DOCS_DIR = os.path.join(BASE_DIR, "docs", "benchmarks", "1.0.0")
 
 TRIAD = [1024, 512, 256]
 

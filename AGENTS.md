@@ -92,7 +92,7 @@ When evaluating multi-slot performance (2, 4, or 6 slots):
 > 
 > The author/agent must either:
 > 1. Find the exact mathematical or synchronization flaw and fix it to achieve 100.000% bit-identity.
-> 2. Immediately abandon the branch, document the failure mechanism, and document the failure mechanism in the benchmark log.
+> 2. Immediately abandon the branch and document the failure mechanism in the benchmark log.
 > 
 > There is NO ACCEPTABLE DEGREE of numerical drift, "almost identical" outputs, or stochastic tolerance during greedy decoding.
 

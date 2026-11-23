@@ -160,4 +160,4 @@ Point any OpenAI-compatible client (Codex CLI, OpenCode 2, Cursor) at `http://<y
 
 ## License
 
-[AGPL-3.0](LICENSE). The model weights are separate and under the Qwen Community License 1.0.
+[AGPL-3.0](LICENSE). The engine server is licensed under AGPL-3.0. Licenses for served model weights are separate and governed by their respective authors.

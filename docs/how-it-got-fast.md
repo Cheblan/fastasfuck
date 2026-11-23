@@ -99,6 +99,7 @@ to 7 tokens ahead, then checks them all with **one** pass of the full model. Tha
 all the rows - and since decode is about reading weights, checking 7 tokens costs far less than generating 7.
 
 ```mermaid
+%%{init: {'sequence': {'mirrorActors': false}}}%%
 sequenceDiagram
     participant E as engine
     participant H as draft head (small)
