@@ -265,7 +265,7 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
          "positions per slot/session (at most 262144 x rope-yarn-factor)"},
         {"capacity", K::Int, 4096, 1 << 20, "262144",
          "alias for slot-capacity (backward compatibility)", "slot-capacity"},
-        {"total-capacity", K::Int, 0, 1 << 24, "0",
+        {"total-capacity", K::Int, 0, 1 << 24, "1048576",
          "global physical capacity ceiling across all slots in tokens; 0 = unconstrained by a global ceiling"},
         {"total-slots", K::Int, 1, 8, "4",
          "conversations served at once, each its own state at the full capacity (one slot's state is ~8 GiB at 512k "
@@ -283,7 +283,7 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
          "region, so (total-slots + 1) x generations x the carve must fit in 32 TiB; an explicit count that doesn't "
          "fails startup, naming the most that fit"},
         {"kv-renew-margin", K::Int, 0, 1024, "0", "obsolete / ignored in flat KV"},
-        {"rope-yarn-factor", K::Number, 1, 8, "2",
+        {"rope-yarn-factor", K::Number, 1, 8, "1",
          "YaRN context extension: positions as trained (262144) x this; 1 = off (RoPE as trained). A change makes "
          "the prompt cache's entries from the other setting unusable (dropped at startup)"},
         {"chunk", K::Int, 1, 16384, "4096", "prefill chunk in tokens; progress and cancellation are checked per chunk"},
@@ -296,15 +296,15 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
         {"prompt-cache", K::OnOff, 0, 0, "on", "prompt cache: on or off (off disables RAM/disk cache without purging disk files)"},
         {"prompt-cache-dir", K::Path, 0, 0, models_dir + "/prompt-cache", "the disk prompt cache's directory"},
         {"prompt-cache-gib", K::Int, 0, 1 << 16, "128", "the disk prompt cache's cap in GiB; 0 = no prompt cache"},
-        {"prompt-cache-ram-margin-gib", K::Int, 0, 1 << 12, std::to_string(cache.ram_margin >> 30),
+        {"prompt-cache-ram-margin-gib", K::Int, 0, 1 << 12, "4",
          "RAM tier: keep MemAvailable above this many GiB"},
-        {"low-memory", K::Text, 0, 0, "fail",
+        {"low-memory", K::Text, 0, 0, "adapt",
          "startup memory check (serve/memory_plan.hpp): fail = refuse to start when MemAvailable after loading is short "
          "of the prompt cache's margin + one full-capacity state, naming the settings that fit; adapt = start with the "
          "RAM caches turned down, each step logged"},
-        {"prompt-cache-idle-s", K::Number, 1, 1e7, fmt_number(cache.idle_seconds),
+        {"prompt-cache-idle-s", K::Number, 1, 1e7, "120",
          "RAM tier: an entry idle this many seconds is written to disk"},
-        {"prompt-cache-write-gib-per-hour", K::Number, 0, 1e6, fmt_number(cache.write_gib_per_hour),
+        {"prompt-cache-write-gib-per-hour", K::Number, 0, 1e6, "48",
          "RAM tier: disk write budget in GiB per hour; 0 = no limit"},
         {"prompt-cache-disk-free-gib", K::Int, 0, 1 << 16, std::to_string(cache.disk_free_margin >> 30),
          "a cache write never leaves less than this many GiB free on the cache's filesystem"},
@@ -320,11 +320,11 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
          "prefill delta rule products: half-u (F16, the state-carrying products as F16 hi + lo pairs, Q / K staged "
          "exactly; ~3% faster prefill at 120k than exact, state error ~9e-6), exact (BF16 hi + lo, near FP32), half (one "
          "F16 product, operands power-of-two scaled; state error ~4e-4) or fast (one BF16 product, state error ~3e-3)"},
-        {"attention-precision", K::Text, 0, 0, "exact",
+        {"attention-precision", K::Text, 0, 0, "fast",
          "prefill attention's P * V: exact (P as BF16 hi + lo) or fast (P as one BF16 term, as flash attention does)"},
         {"kv-cache", K::Text, 0, 0, "q8",
          "attention K/V cache: q8 (8 bits, layout c: ~56% of bf16's memory and prompt-cache bytes) or bf16"},
-        {"kv-precommit", K::OnOff, 0, 0, "off",
+        {"kv-precommit", K::OnOff, 0, 0, "on",
          "pre-commit and map the full capacity for every slot upfront at startup (eliminates mid-generation OOM and page-fault latency spikes)"},
         {"mtp", K::OnOff, 0, 0, "on", "MTP drafting"},
         // MTP defaults: chained drafts at margin 1.5 with a 65536-id draft vocabulary, 7 drafts (reasons in
@@ -353,7 +353,7 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
         {"mtp-lut-step-penalty", K::Number, 0.0, 1.0, "0.015", "MTP cost-gating LUT step penalty deduction"},
         {"mtp-ema-decay", K::Number, 0.01, 1.0, "0.15", "MTP cost-gating Renewal-Reward EMA smoothing factor"},
         {"mtp-vocab", K::Int, 0, 1 << 30, "0", "MTP: drafts are scored over token ids [0, N); 0 = the whole vocabulary"},
-        {"mtp-vocab-filter", K::Text, 0, 0, "en+ru",
+        {"mtp-vocab-filter", K::Text, 0, 0, "all",
          "MTP draft vocabulary filter preset (all, en+ru, en, no-cjk) or comma-separated sections "
          "(core,latin,cyrillic,greek,digits,punct,code,cjk,arabic,asian,other)"},
         {"draft-head-q4", K::OnOff, 0, 0, "on",
