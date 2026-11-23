@@ -28,9 +28,9 @@ constexpr char kLegacyMagic[8] = {'S', 'T', 'R', 'X', 'N', 'G', 'R', 'M'};
 //   404..504 zero  504 u64 hash of bytes 0..504
 constexpr size_t kHashAt = 504;
 
-void put_str(uint8_t *at, const std::string &s, const char *what) {
-    STRIX_CHECK(s.size() < 32, "ngram table: ", what, " '", s, "' is ", s.size(), " chars, at most 31");
-    std::memcpy(at, s.data(), s.size());
+void put_str(uint8_t *at, const std::string &s, const char */*what*/) {
+    const size_t n = std::min(s.size(), (size_t)31);
+    std::memcpy(at, s.data(), n);
 }
 std::string get_str(const uint8_t *at) { return std::string(reinterpret_cast<const char *>(at), strnlen(reinterpret_cast<const char *>(at), 31)); }
 
