@@ -72,13 +72,9 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 ```
 
-## Model weights - Qwen Community License 1.0
+## Model weights
 
-The model weights strixite runs are not in this repository. They are a derivative of
-[Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), published separately at
-[wemoh/Qwen3.8-Flash-Next-strixw](https://huggingface.co/wemoh/Qwen3.8-Flash-Next-strixw) under the Qwen Community
-License 1.0, together with that license's full text and the tokenizer / configuration files copied from the original
-checkpoint.
+The model weights that strixite executes are not distributed as part of this repository. The engine server is licensed under AGPL-3.0, whereas licenses for any served model weights, fine-tunes, tokenizers, and derived checkpoints (such as derivatives of [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) published at [wemoh/Qwen3.8-Flash-Next-strixw](https://huggingface.co/wemoh/Qwen3.8-Flash-Next-strixw)) are governed separately by their respective original authors and creators. Please consult the corresponding model repositories and authors directly for their specific licensing terms.
 
 ## Build and test dependencies
 
