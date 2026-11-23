@@ -1,91 +1,65 @@
-# fastasfuck's release container image: the server and its tools, built from a release tag with the pinned TheRock
-# ROCm toolchain, on Fedora 43 (the tested distribution). The weights are not in the image - mount the directory you
-# downloaded them to at /models.
+# fastasfuck release container image: server and tools built natively on Arch Linux for AMD Strix Halo (gfx1151).
+# Weights are not included in the image - mount your model directory at /models.
 #
-# Third-party libraries and their licenses: /opt/fastasfuck/NOTICE.md and /opt/fastasfuck/licenses/ in the image.
+# Run (podman or docker):
+#   podman run -d --name fastasfuck \
+#       --device /dev/kfd --device /dev/dri \
+#       --security-opt seccomp=unconfined \
+#       -p 5300:5300 \
+#       -v /path/to/models:/models \
+#       ghcr.io/cheblan/fastasfuck:latest
 #
-# Build it with deploy/container/build-image.sh (it prepares the build context: the source at a git ref and the
-# TheRock tarball, checked against its sha256). Nothing is fetched at build time but the base image and Fedora's
-# packages - the toolchain comes from the context, so a build is reproducible from the same two inputs.
-#
-# Run (podman; docker takes the same flags):
-#   podman run -d --name fastasfuck --device /dev/kfd --device /dev/dri --group-add keep-groups \
-#       --security-opt seccomp=unconfined --security-opt label=disable -p 5300:5300 -v ~/models/strix-infer:/models \
-#       ghcr.io/Cheblan/fastasfuck:TAG
-# (label=disable: SELinux would otherwise keep the container from reading your home directory's files; docs/container.md)
-# The host still needs the kernel parameters from the README's Quick start (the GPU's memory limit) - a container
-# can't set those.
+# Multi-stage build:
+# 1. build: compiles fastasfuck on Arch Linux using native Arch ROCm packages (rocm-hip-sdk, rocm-llvm, cmake, ninja).
+# 2. runtime: minimal Arch Linux base image with only the HIP runtime (hip-runtime-amd), keeping image lean (~1.18 GiB).
 
-ARG FEDORA=43
+# --- Stage 1: Build ---
+FROM docker.io/archlinux:base-devel AS build
 
-# --- build: the toolchain from the context, the code compiled for gfx1151 ---
-FROM registry.fedoraproject.org/fedora:${FEDORA} AS build
-ARG THEROCK=therock-dist-linux-gfx1151-10.1.0
-RUN dnf -y install --setopt=install_weak_deps=False cmake ninja-build gcc-c++ libstdc++-devel findutils && dnf clean all
-# Fedora's packages of the upstream projects TheRock bundles (LLVM and its rocm_sysdeps libraries) - installed only for
-# their license texts, which go into the image next to the libraries (deploy/container/NOTICE-image.md).
-# Two ship no license file: libdrm (MIT - its notice is in its own headers, hence libdrm-devel) and numactl-libs
-# (LGPL-2.1 - glibc carries the text of that same license); both handled below.
-ARG LICENSE_PKGS="llvm-libs zlib-ng libzstd elfutils-libelf xz-libs bzip2-libs"
-RUN dnf -y install --setopt=install_weak_deps=False ${LICENSE_PKGS} libdrm-devel numactl-libs glibc && dnf clean all
-COPY ${THEROCK}.tar.gz /tmp/
-RUN mkdir -p /root/tools/therock-tarball/install \
- && tar -xzf /tmp/${THEROCK}.tar.gz -C /root/tools/therock-tarball/install \
- && rm /tmp/${THEROCK}.tar.gz \
- && test -x /root/tools/therock-tarball/install/lib/llvm/bin/clang++ \
- || { echo "Containerfile: ${THEROCK} has no lib/llvm/bin/clang++ - not the expected TheRock layout"; exit 1; }
-COPY src/ /src/
+# Install Arch ROCm development toolchain and build tools
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm --needed \
+        rocm-hip-sdk \
+        rocm-llvm \
+        cmake \
+        ninja \
+        git && \
+    pacman -Scc --noconfirm
+
+COPY . /src
 WORKDIR /src
-RUN cmake --preset strix -DSTRIX_DEV_TOOLS=OFF && cmake --build --preset strix
-# The runtime libraries the binaries load, resolved by the loader itself (ldd) rather than listed by hand: everything
-# from the TheRock tree goes into /opt/fastasfuck/lib; the system's own (libc, libstdc++) come from the runtime image.
-RUN set -e; mkdir -p /opt/fastasfuck/bin /opt/fastasfuck/lib; \
-    for b in fastasfuck_server inspect_faf convert_qwen4exp convert_ngram_table transcode_ngram_table; do \
-        test -x build/strix/$b || { echo "Containerfile: build/strix/$b missing after the build"; exit 1; }; \
-        cp build/strix/$b /opt/fastasfuck/bin/; \
-        ldd build/strix/$b | awk '/=> \/root\/tools\/therock-tarball/ {print $3}' | xargs -r -I{} cp -L {} /opt/fastasfuck/lib/; \
-        if ldd build/strix/$b | grep -q "not found"; then echo "Containerfile: $b has unresolved libraries"; ldd build/strix/$b; exit 1; fi; \
-    done; \
-    cp deploy/strix-server.conf /opt/fastasfuck/; \
-    cp LICENSE THIRD_PARTY.md /opt/fastasfuck/
-# License texts for every library in /opt/fastasfuck/lib: TheRock's own for the ROCm parts, Fedora's for the upstream
-# projects (the directory names match the NOTICE). A package without a license file fails the build.
-COPY NOTICE-image.md /opt/fastasfuck/NOTICE.md
-RUN set -e; L=/opt/fastasfuck/licenses; T=/root/tools/therock-tarball/install/share/doc; \
-    for d in hip rocr amd_comgr rocprofiler-register; do \
-        test -d $T/$d || { echo "Containerfile: TheRock has no share/doc/$d"; exit 1; }; \
-        mkdir -p $L/therock/$d; cp $T/$d/LICENSE* $L/therock/$d/; \
-    done; \
-    for p in ${LICENSE_PKGS}; do \
-        n=$p; [ $p = zlib-ng ] && n=zlib; [ $p = libzstd ] && n=zstd; \
-        f=$(rpm -qL $p | grep -v "^(contains no files)" || true); \
-        [ -n "$f" ] || { echo "Containerfile: $p ships no license file"; exit 1; }; \
-        mkdir -p $L/$n; echo "$f" | xargs -I{} cp {} $L/$n/; \
-    done; \
-    mkdir -p $L/libdrm $L/numactl-libs; \
-    { echo "libdrm ($(rpm -q --qf '%{URL}, %{LICENSE}' libdrm)) - Fedora's package ships no license file; these"; \
-      echo "are the notices from libdrm's own headers (xf86drm.h, the core library; amdgpu.h, libdrm_amdgpu)."; echo; \
-      for h in /usr/include/xf86drm.h /usr/include/libdrm/amdgpu.h; do \
-          echo "--- $(basename $h)"; awk '/Copyright/{on=1} on{print} on&&/\*\//{exit}' $h; echo; \
-      done; } > $L/libdrm/NOTICE; \
-    grep -q "Permission is hereby granted" $L/libdrm/NOTICE || { echo "Containerfile: no MIT notice found in libdrm's headers"; exit 1; }; \
-    { echo "numactl's libnuma ($(rpm -q --qf '%{URL}, %{LICENSE}' numactl-libs)): the library is LGPL-2.1. Fedora's"; \
-      echo "package ships no license file; LICENSE.LGPL-2.1 here is the text of that license as glibc ships it."; } \
-        > $L/numactl-libs/README; \
-    cp /usr/share/licenses/glibc/COPYING.LIB $L/numactl-libs/LICENSE.LGPL-2.1; \
-    grep -q "GNU LESSER GENERAL PUBLIC LICENSE" $L/numactl-libs/LICENSE.LGPL-2.1 \
-        || { echo "Containerfile: glibc's COPYING.LIB isn't the LGPL text"; exit 1; }
 
-# --- runtime: Fedora's base, the binaries and their TheRock libraries ---
-FROM registry.fedoraproject.org/fedora-minimal:${FEDORA}
+# Compile with preset strix (targets gfx1151 / Zen 5)
+RUN cmake --preset strix -DSTRIX_DEV_TOOLS=OFF && \
+    cmake --build --preset strix
+
+# Stage binaries and configs
+RUN mkdir -p /opt/fastasfuck/bin /opt/fastasfuck/share && \
+    for b in fastasfuck_server inspect_faf convert_qwen4exp convert_ngram_table transcode_ngram_table; do \
+        test -x build/strix/$b || { echo "Containerfile: build/strix/$b missing"; exit 1; }; \
+        cp build/strix/$b /opt/fastasfuck/bin/; \
+    done && \
+    cp deploy/fastasfuck-server.conf /opt/fastasfuck/ && \
+    cp LICENSE THIRD_PARTY.md /opt/fastasfuck/share/
+
+# --- Stage 2: Runtime ---
+FROM docker.io/archlinux:base AS runtime
+
+# Install ONLY the runtime HIP stack (hip-runtime-amd) - NO bloated rocblas / miopen
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm --needed \
+        hip-runtime-amd && \
+    pacman -Scc --noconfirm && \
+    rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/* /tmp/*
+
 COPY --from=build /opt/fastasfuck /opt/fastasfuck
-ENV LD_LIBRARY_PATH=/opt/fastasfuck/lib \
-    PATH=/opt/fastasfuck/bin:/usr/bin:/bin \
+
+ENV PATH=/opt/fastasfuck/bin:/usr/bin:/bin \
+    LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib/llvm/lib:/usr/lib \
     STRIX_MODELS_DIR=/models \
     HSA_DISABLE_COREDUMP_ON_EXCEPTION=1
-# (no GPU memory dump into the working directory on a GPU fault - deploy/strix-server.service says why)
+
 VOLUME /models
 EXPOSE 5300
-# /models: the downloaded weights (hf download ... --local-dir), and the prompt cache's directory (prompt-cache/,
-# created on first use - it must be writable). Any setting can be overridden with flags after the image name.
+
 ENTRYPOINT ["/opt/fastasfuck/bin/fastasfuck_server", "--config", "/opt/fastasfuck/fastasfuck-server.conf"]

@@ -1,52 +1,43 @@
 #!/bin/bash
-# Build fastasfuck's release container image (deploy/container/Containerfile) from a git ref of a fastasfuck clone and
-# the pinned TheRock tarball, on a Strix Halo machine (a release image is built where it is tested).
+# Build fastasfuck's release container image on Arch Linux for AMD Strix Halo (gfx1151).
 #
-#   build-image.sh FASTASFUCK_CLONE REF [THEROCK_TARBALL]
-#     FASTASFUCK_CLONE   a clone of github.com/Cheblan/fastasfuck (clean: no local changes to tracked files)
-#     REF              the tag or commit to build (e.g. v0.2.0); the image is tagged fastasfuck:<REF>
-#     THEROCK_TARBALL  default ~/tools/therock-tarball/therock-dist-linux-gfx1151-10.1.0.tar.gz; its .sha256 file
-#                      next to it must match (TheRock's first GA release for gfx1151, the toolchain the Quick start
-#                      names; pass an older path to rebuild an older tag exactly as it shipped)
+# Usage:
+#   build-image.sh [FASTASFUCK_ROOT] [TAG]
 #
-# The build context is a fresh temporary directory holding only the source at REF (git archive - nothing untracked
-# leaks in) and the tarball, so two builds from the same inputs see the same files. Prints the image's size and the
-# libraries it carries at the end.
+# Example:
+#   ./deploy/container/build-image.sh . latest
 set -eo pipefail
-clone=${1:?usage: build-image.sh FASTASFUCK_CLONE REF [THEROCK_TARBALL]}
-ref=${2:?usage: build-image.sh FASTASFUCK_CLONE REF [THEROCK_TARBALL]}
-tarball=${3:-$HOME/tools/therock-tarball/therock-dist-linux-gfx1151-10.1.0.tar.gz}
+
+root=${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}
+tag=${2:-latest}
 here=$(cd "$(dirname "$0")" && pwd)
 
-command -v podman > /dev/null || { echo "build-image: podman not on PATH"; exit 1; }
-git -C "$clone" rev-parse --git-dir > /dev/null 2>&1 || { echo "build-image: $clone is not a git clone"; exit 1; }
-commit=$(git -C "$clone" rev-parse --verify --short "$ref^{commit}" 2> /dev/null) \
-    || { echo "build-image: '$ref' is not a commit or tag in $clone"; exit 1; }
-[ -f "$tarball" ] || { echo "build-image: TheRock tarball $tarball missing"; exit 1; }
-[ -f "$tarball.sha256" ] || { echo "build-image: $tarball.sha256 missing - can't check the toolchain"; exit 1; }
-want=$(awk '{print $1}' "$tarball.sha256")
-have=$(sha256sum "$tarball" | awk '{print $1}')
-[ "$want" = "$have" ] || { echo "build-image: $tarball sha256 $have, expected $want"; exit 1; }
-name=$(basename "$tarball" .tar.gz)
-case "$name" in therock-dist-linux-gfx1151-*) ;; *) echo "build-image: $name isn't a gfx1151 TheRock build"; exit 1 ;; esac
+ENGINE="podman"
+if ! command -v podman > /dev/null 2>&1; then
+    if command -v docker > /dev/null 2>&1; then
+        ENGINE="docker"
+    else
+        echo "build-image: neither podman nor docker found on PATH"
+        exit 1
+    fi
+fi
 
-ctx=$(mktemp -d "${TMPDIR:-/tmp}/fastasfuck-image.XXXXXX")
-trap 'rm -rf "$ctx"' EXIT
-mkdir "$ctx/src"
-git -C "$clone" archive "$ref" | tar -x -C "$ctx/src"
-cp "$tarball" "$ctx/"
-cp "$here/Containerfile" "$ctx/"
-cp "$here/NOTICE-image.md" "$ctx/"
-echo "build-image: fastasfuck $ref ($commit), toolchain $name, context $ctx"
+commit=$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-tag="fastasfuck:$ref"
-podman build --build-arg THEROCK="$name" --label org.opencontainers.image.revision="$commit" \
-    --label org.opencontainers.image.version="$ref" --label org.opencontainers.image.source=https://github.com/Cheblan/fastasfuck \
-    --label org.opencontainers.image.title=fastasfuck --label org.opencontainers.image.licenses=AGPL-3.0-only \
-    --label org.opencontainers.image.description="fastasfuck: Qwen3.8-Flash-Next inference on AMD Strix Halo (gfx1151)" \
-    --label org.opencontainers.image.url=https://github.com/Cheblan/fastasfuck --label org.opencontainers.image.vendor= \
-    --label name=fastasfuck --label license=AGPL-3.0-only --label vendor= --label version="$ref" \
-    --label org.opencontainers.image.name=fastasfuck --label org.opencontainers.image.license=AGPL-3.0-only \
-    -t "$tag" -f "$ctx/Containerfile" "$ctx"
-echo "build-image: built $tag - $(podman image inspect "$tag" --format '{{.Size}}' | numfmt --to=iec) - libraries:"
-podman run --rm --entrypoint /usr/bin/ls "$tag" /opt/fastasfuck/lib
+echo "build-image: building fastasfuck:$tag ($commit) using $ENGINE on Arch Linux base..."
+
+$ENGINE build \
+    --label org.opencontainers.image.revision="$commit" \
+    --label org.opencontainers.image.version="$tag" \
+    --label org.opencontainers.image.source=https://github.com/Cheblan/fastasfuck \
+    --label org.opencontainers.image.title=fastasfuck \
+    --label org.opencontainers.image.licenses=AGPL-3.0-only \
+    --label org.opencontainers.image.description="fastasfuck: High-throughput LLM inference engine on AMD Strix Halo (gfx1151)" \
+    -t "fastasfuck:$tag" \
+    -f "$here/Containerfile" \
+    "$root"
+
+echo "build-image: successfully built fastasfuck:$tag"
+if [ "$ENGINE" = "podman" ]; then
+    echo "Image size: $(podman image inspect "fastasfuck:$tag" --format '{{.Size}}' | numfmt --to=iec 2>/dev/null || true)"
+fi
