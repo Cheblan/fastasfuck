@@ -1,7 +1,7 @@
 #include "formats/ngram_table.hpp"
 
 #include "common/check.hpp"
-#include "formats/strixw.hpp"  // strix_hash64
+#include "formats/faf.hpp"  // strix_hash64
 
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -19,7 +19,8 @@ namespace strix {
 
 namespace {
 
-constexpr char kMagic[8] = {'S', 'T', 'R', 'X', 'N', 'G', 'R', 'M'};
+constexpr char kMagic[8] = {'F', 'A', 'F', 'N', 'G', 'R', 'A', 'M'};
+constexpr char kLegacyMagic[8] = {'S', 'T', 'R', 'X', 'N', 'G', 'R', 'M'};
 // Header layout (little endian; x86-64 host, memcpy is the encoding):
 //   0 magic[8]  8 u32 version  12 u32 header bytes  16 u64 rows  24 u32 row_dim  28 u32 dtype  32 u64 data offset
 //   40 u64 file bytes  48 i64 eos  56 i64 multipliers[3]  80 i64 vocab[16]  208 i64 offsets[16]
@@ -256,7 +257,7 @@ NgramTableFile::NgramTableFile(const std::string &path) : path_(path) {
             std::memcpy(&v, h.data() + off, sizeof(v));
             return v;
         };
-        STRIX_CHECK(std::memcmp(h.data(), kMagic, 8) == 0, where, ": not an n-gram table (bad magic)");
+        STRIX_CHECK(std::memcmp(h.data(), kMagic, 8) == 0 || std::memcmp(h.data(), kLegacyMagic, 8) == 0, where, ": not an n-gram table (bad magic)");
         const uint32_t version = rd(8, uint32_t{}), hsize = rd(12, uint32_t{});
         STRIX_CHECK(version == 1 || version == kNgramTableVersion, where, ": version ", version, ", this build reads 1..",
                     kNgramTableVersion);

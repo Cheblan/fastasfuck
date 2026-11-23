@@ -39,9 +39,9 @@ float compute_stdev(const std::vector<float> &v, float mean) {
 } // namespace
 
 int main(int argc, char **argv) {
-    std::string weights_path = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/weights-q6-hybrid.strixw";
-    std::string ngram_path = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/ngram.table";
-    std::string tokenizer_path = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/tokenizer.json";
+    std::string weights_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/weights-q6-hybrid.faf";
+    std::string ngram_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/ngram.table";
+    std::string tokenizer_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/tokenizer.json";
     std::string text_path = "/models/wikitext-2-test.txt";
     std::string output_json = "verify_curve_results.json";
     int n_trials = 5;

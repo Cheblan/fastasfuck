@@ -1,4 +1,4 @@
-// Offline converter: Qwen3.8-Flash-Next HF safetensors -> <out>/weights.strixw (formats/strixw.hpp).
+// Offline converter: Qwen3.8-Flash-Next HF safetensors -> <out>/weights.faf (formats/faf.hpp).
 // Verbose by default: every step is logged to stderr and to <out>/convert.log.
 //
 // Usage: convert_qwen4exp --src DIR --out DIR --git HASH [--threads N] [--layout default=q4g64,...]
@@ -6,10 +6,10 @@
 //                         [--tower-only] [--plan]
 //   --mtp-from    replace the checkpoint's mtp.* tensors with this safetensors file's (a fine-tuned draft head);
 //                 the trunk and its fingerprint stay the checkpoint's
-//   --vision      also write <out>/vision.strixw: the vision tower as exact BF16, validated against the
+//   --vision      also write <out>/vision.faf: the vision tower as exact BF16, validated against the
 //                 checkpoint's config.json "vision_config"
-//   --tower-only  (implies --vision) write <out>/vision.strixw and nothing else - adds the tower to an
-//                 output directory converted without --vision; never touches an existing weights.strixw
+//   --tower-only  (implies --vision) write <out>/vision.faf and nothing else - adds the tower to an
+//                 output directory converted without --vision; never touches an existing weights.faf
 //   --plan        read the headers, log the full plan (every output tensor), write nothing
 //   --layers ...  convert only these decoder layers (a partial file, marked complete=no)
 

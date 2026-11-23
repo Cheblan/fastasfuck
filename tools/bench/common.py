@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 tools/bench/common.py: Shared test prompts, statistical helpers, and OpenAI API client
-for strixite production benchmarking on AMD Strix Halo (gfx1151).
+for fastasfuck production benchmarking on AMD Strix Halo (gfx1151).
 """
 
 import urllib.request

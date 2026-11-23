@@ -83,7 +83,7 @@ void qsa_scores(const void *q, int64_t q_ts, int64_t q_hs, int64_t T, int64_t po
 enum class TopkPath { Auto, Split, Row, Coop, Filter, FilterTight };
 constexpr int64_t kQsaTopkRowMaxT = 8, kQsaTopkRowMaxBlocks = 16384;
 // The path Auto takes for T queries over rows of nb complete blocks: Row up to kQsaTopkRowMaxBlocks, past that Split
-// for T <= kQsaTopkRowMaxT and Filter for more. Never Coop (strixite #31: coop launch hangs when other streams share GPU).
+// for T <= kQsaTopkRowMaxT and Filter for more. Never Coop (upstream #31: coop launch hangs when other streams share GPU).
 TopkPath qsa_topk_auto_path(int64_t T, int64_t nb);
 size_t qsa_topk_workspace_bytes(int64_t T);
 // Rows of the filter path that fell back to the whole-row select since the last call (synchronizes stream; resets the

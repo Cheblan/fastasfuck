@@ -18,7 +18,7 @@ from common import STANDARD_PROMPTS, warmup_server, query_chat_stream, summarize
 
 def run_solo_sterile(base_url: str, n_trials: int = 5, output_json: str = None) -> Dict[str, Any]:
     print("=" * 80)
-    print("STRIXITE SOLO STERILE BENCHMARK (1 Slot, T=0.0, Greedy Decoding)")
+    print("FASTASFUCK SOLO STERILE BENCHMARK (1 Slot, T=0.0, Greedy Decoding)")
     print(f"Target Server : {base_url}")
     print(f"Trials        : n={n_trials} measurement passes (+ 1 untimed warmup ping)")
     print("=" * 80)
@@ -131,8 +131,8 @@ def run_solo_sterile(base_url: str, n_trials: int = 5, output_json: str = None) 
     return report
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Strixite Solo Sterile Benchmark (1 Slot, T=0.0)")
-    parser.add_argument("--url", default="http://127.0.0.1:5300", help="Base URL of strix_server")
+    parser = argparse.ArgumentParser(description="fastasfuck Solo Sterile Benchmark (1 Slot, T=0.0)")
+    parser.add_argument("--url", default="http://127.0.0.1:5300", help="Base URL of fastasfuck_server")
     parser.add_argument("--trials", type=int, default=5, help="Number of measurement trials per prompt (default: 5)")
     parser.add_argument("--output", default="benchmark_solo_sterile.json", help="Path to save JSON report")
     args = parser.parse_args()

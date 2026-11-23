@@ -14,7 +14,7 @@
 // rule, so every consumer answers "is there room?" the same way and a refusal is real.
 //
 // Reservations: a reading can't see an allocation that was granted but hasn't landed yet, so two callers on two
-// slots could each pass the rule on the same reading and both allocate - together past the floor (strixite #42).
+// slots could each pass the rule on the same reading and both allocate - together past the floor (upstream #42).
 // try_reserve checks and books the bytes in one step; every reading subtracts the booked bytes until the caller's
 // allocation has landed and it calls release.
 // Thread-safe: the booking has its own lock; available() reads /proc/meminfo, which needs no lock, and the rule is a

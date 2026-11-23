@@ -13,7 +13,7 @@
 namespace strix {
 
 // The HIP errors that leave the device context unusable (sticky: every later call returns an error, as after an
-// illegal address or a memory aperture violation - strixite issue #6): a kernel fault, an assert, a launch that
+// illegal address or a memory aperture violation - upstream issue #6): a kernel fault, an assert, a launch that
 // timed out, or a context already destroyed. Everything else (out of memory, a bad argument) leaves the GPU usable.
 inline bool hip_error_is_sticky(hipError_t e) {
     switch (e) {

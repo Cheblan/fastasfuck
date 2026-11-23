@@ -3,7 +3,7 @@
 // Vision tower kernels: the pieces
 // around the BF16 GEMMs - vision_linear_bias is its own dev-stage kernel, not kernels/linear (the tower
 // needs the bias added on the FP32 accumulator, with BF16 weights). Activations are F32 or BF16 (raw bits); math is
-// FP32, one rounding where the output is stored. Tower weights are BF16 in vision.strixw; the norm
+// FP32, one rounding where the output is stored. Tower weights are BF16 in vision.faf; the norm
 // gains/biases reach these kernels widened to FP32 by the loader (the engine's convention).
 
 #include "kernels/norm.hpp"  // Act

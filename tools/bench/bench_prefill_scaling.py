@@ -66,9 +66,9 @@ def slice_corpus_prompt(corpus: str, target_tokens: int, offset_idx: int, nonce:
     footer = "\n\n// Summarize the architecture and design patterns in this codebase in under 20 words."
     return header + chunk + footer
 
-def run_prefill_scaling(base_url: str, repo_dir: str = "/home/cheblan/strixite-main", output_json: str = None) -> Dict[str, Any]:
+def run_prefill_scaling(base_url: str, repo_dir: str = "/home/cheblan/fastasfuck-main", output_json: str = None) -> Dict[str, Any]:
     print("=" * 85)
-    print("STRIXITE PREFILL CONTEXT SCALING BENCHMARK (1 Slot)")
+    print("FASTASFUCK PREFILL CONTEXT SCALING BENCHMARK (1 Slot)")
     print(f"Target Server : {base_url}")
     print("Corpus Source : Non-repeating C++ source code from serve/*.cpp & serve/*.hpp")
     print("Contexts      : 4k, 16k, 32k (n=5 trials), 64k, 128k (n=3 trials)")
@@ -177,9 +177,9 @@ def run_prefill_scaling(base_url: str, repo_dir: str = "/home/cheblan/strixite-m
     return report
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Strixite Prefill Context Scaling Benchmark")
-    parser.add_argument("--url", default="http://127.0.0.1:5300", help="Base URL of strix_server")
-    parser.add_argument("--repo", default="/home/cheblan/strixite-main", help="Path to repo root for corpus")
+    parser = argparse.ArgumentParser(description="fastasfuck Prefill Context Scaling Benchmark")
+    parser.add_argument("--url", default="http://127.0.0.1:5300", help="Base URL of fastasfuck_server")
+    parser.add_argument("--repo", default="/home/cheblan/fastasfuck-main", help="Path to repo root for corpus")
     parser.add_argument("--output", default="benchmark_prefill_scaling.json", help="Path to save JSON report")
     args = parser.parse_args()
 

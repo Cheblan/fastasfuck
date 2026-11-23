@@ -58,7 +58,7 @@ def run_concurrent_pass(base_url: str, n_slots: int, prompt_indices: List[int], 
 
 def run_multislot_benchmark(base_url: str, n_trials: int = 3, output_json: str = None) -> Dict[str, Any]:
     print("=" * 80)
-    print("STRIXITE MULTI-SLOT CONCURRENCY BENCHMARK (1, 2, 4 Slots, T=0.6)")
+    print("FASTASFUCK MULTI-SLOT CONCURRENCY BENCHMARK (1, 2, 4 Slots, T=0.6)")
     print(f"Target Server : {base_url}")
     print(f"Trials        : n={n_trials} measurement trials per configuration (+ warmup)")
     print("=" * 80)
@@ -156,8 +156,8 @@ def run_multislot_benchmark(base_url: str, n_trials: int = 3, output_json: str =
     return report
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Strixite Multi-Slot Concurrency Benchmark")
-    parser.add_argument("--url", default="http://127.0.0.1:5300", help="Base URL of strix_server")
+    parser = argparse.ArgumentParser(description="fastasfuck Multi-Slot Concurrency Benchmark")
+    parser.add_argument("--url", default="http://127.0.0.1:5300", help="Base URL of fastasfuck_server")
     parser.add_argument("--trials", type=int, default=3, help="Number of measurement trials (default: 3)")
     parser.add_argument("--output", default="benchmark_multislot_scaling.json", help="Path to save JSON report")
     args = parser.parse_args()

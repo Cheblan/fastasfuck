@@ -385,10 +385,10 @@ public:
 
     void set_q(ConvertStep &s, const std::string &cls) {
         const QFmt &f = layout_.at(cls);
-        s.out.encoding = f.bits == 8 ? StrixwEncoding::Q8RowMajor
-                         : f.bits == 6 ? StrixwEncoding::Q6RowMajor
-                         : f.bits == 5 ? StrixwEncoding::Q5RowMajor
-                                       : StrixwEncoding::Q4RowMajor;
+        s.out.encoding = f.bits == 8 ? FafEncoding::Q8RowMajor
+                         : f.bits == 6 ? FafEncoding::Q6RowMajor
+                         : f.bits == 5 ? FafEncoding::Q5RowMajor
+                                       : FafEncoding::Q4RowMajor;
         s.out.group_size = f.G;
     }
     void quant_single(const std::string &name, const std::string &cls, int64_t unit) {
@@ -417,7 +417,7 @@ public:
         });
         ConvertStep s;
         s.out.name = g.name;
-        s.out.encoding = StrixwEncoding::BF16;
+        s.out.encoding = FafEncoding::BF16;
         if (!bf16) set_q(s, cls);
         s.out.shape = {m.rows, m.K};
         s.out.experts = m.experts;
@@ -432,7 +432,7 @@ public:
     void copy_bf16(const std::string &name, int64_t unit) {
         const TensorInfo &ti = need(name, Dtype::BF16);
         ConvertStep s;
-        s.out.name = name, s.out.encoding = StrixwEncoding::BF16, s.out.shape = ti.shape;
+        s.out.name = name, s.out.encoding = FafEncoding::BF16, s.out.shape = ti.shape;
         s.op = ConvertOp::BF16Rows, s.sources = {name};
         add(std::move(s), unit);
     }
@@ -446,14 +446,14 @@ public:
     void f32(const std::string &name, int64_t unit) {
         const TensorInfo &ti = need(name, Dtype::BF16);
         ConvertStep s;
-        s.out.name = name, s.out.encoding = StrixwEncoding::F32, s.out.shape = ti.shape;
+        s.out.name = name, s.out.encoding = FafEncoding::F32, s.out.shape = ti.shape;
         s.op = ConvertOp::F32Widen, s.sources = {name};
         add(std::move(s), unit);
     }
     void i64(const std::string &name, int64_t unit) {
         const TensorInfo &ti = need(name, Dtype::I64);
         ConvertStep s;
-        s.out.name = name, s.out.encoding = StrixwEncoding::I64, s.out.shape = ti.shape;
+        s.out.name = name, s.out.encoding = FafEncoding::I64, s.out.shape = ti.shape;
         s.op = ConvertOp::I64Copy, s.sources = {name};
         add(std::move(s), unit);
     }
@@ -488,7 +488,7 @@ public:
         add(std::move(s), unit);
         ConvertStep u;
         u.out.name = p + "mix_up", u.out.shape = tu.shape;
-        u.out.encoding = layout_.at("hc_up").bits == 8 ? StrixwEncoding::Q8ChunkMajor : StrixwEncoding::Q4ChunkMajor;
+        u.out.encoding = layout_.at("hc_up").bits == 8 ? FafEncoding::Q8ChunkMajor : FafEncoding::Q4ChunkMajor;
         u.out.group_size = layout_.at("hc_up").G;
         u.op = ConvertOp::Q4ChunkMajor, u.sources = {up};
         add(std::move(u), unit);
@@ -590,7 +590,7 @@ ConvertPlan make_plan(const Source &src, const ConvertOptions &opt) {
     }
     for (const std::string &n : src.names())
         if (n.rfind("model.visual.", 0) == 0)
-            p.plan.skipped.emplace_back(n, opt.vision ? "vision tower: not in this file (written to vision.strixw)"
+            p.plan.skipped.emplace_back(n, opt.vision ? "vision tower: not in this file (written to vision.faf)"
                                                        : "vision tower: not loaded (text only)");
     // A full conversion accounts for every source tensor; anything unplanned is a spec gap, not a skip.
     const bool full = opt.layers.empty() && opt.globals && opt.mtp;
@@ -713,10 +713,10 @@ template <typename W, typename RowSrc> double sampled_error(const W &q, RowSrc r
 // The log's op column: the op, with q8 / q6 shown for Q8 / Q6 steps ("q4" / "q8" / "q6" / "q4-fold" / ...).
 std::string step_tag(const ConvertStep &s) {
     std::string t = convert_op_name(s.op);
-    if (s.out.encoding == StrixwEncoding::Q8RowMajor || s.out.encoding == StrixwEncoding::Q8ChunkMajor)
+    if (s.out.encoding == FafEncoding::Q8RowMajor || s.out.encoding == FafEncoding::Q8ChunkMajor)
         t = "q8" + t.substr(2);
-    if (s.out.encoding == StrixwEncoding::Q6RowMajor) t = "q6" + t.substr(2);
-    if (s.out.encoding == StrixwEncoding::Q5RowMajor) t = "q5" + t.substr(2);
+    if (s.out.encoding == FafEncoding::Q6RowMajor) t = "q6" + t.substr(2);
+    if (s.out.encoding == FafEncoding::Q5RowMajor) t = "q5" + t.substr(2);
     return t;
 }
 
@@ -806,7 +806,7 @@ std::string unit_name(int64_t unit, int64_t layers_total, const ConvertPlan &pla
            (full ? " - full attention (QSA)" : " - linear attention (GDN)");
 }
 
-// ---------------------------------------------------------------- vision tower (vision.strixw)
+// ---------------------------------------------------------------- vision tower (vision.faf)
 
 // One expected vision tensor: checkpoint name and shape.
 struct VisionTensor {
@@ -870,20 +870,20 @@ std::vector<VisionTensor> vision_expected(const VisionDims &vd) {
 // The tower tensors: every expected one present with exactly its BF16 dtype and shape, and nothing
 // visual in the checkpoint that isn't expected (an unaccounted-for tensor is a spec gap, same rule as
 // the text plan).
-std::vector<StrixwTensor> plan_vision(const Source &src, const VisionDims &vd) {
-    std::vector<StrixwTensor> out;
+std::vector<FafTensor> plan_vision(const Source &src, const VisionDims &vd) {
+    std::vector<FafTensor> out;
     for (const VisionTensor &e : vision_expected(vd)) {
         const TensorInfo &ti = src.info(e.name);  // throws, naming the checkpoint, if absent
         STRIX_CHECK(ti.dtype == Dtype::BF16, "convert --vision: '", e.name, "' is ", dtype_name(ti.dtype),
                     ", expected BF16");
         STRIX_CHECK(ti.shape == e.shape, "convert --vision: '", e.name, "' has shape ", shape_str(ti.shape),
                     ", config.json vision_config implies ", shape_str(e.shape));
-        StrixwTensor t;
-        t.name = e.name, t.encoding = StrixwEncoding::BF16, t.shape = e.shape;
+        FafTensor t;
+        t.name = e.name, t.encoding = FafEncoding::BF16, t.shape = e.shape;
         out.push_back(std::move(t));
     }
     std::set<std::string> expected;
-    for (const StrixwTensor &t : out) expected.insert(t.name);
+    for (const FafTensor &t : out) expected.insert(t.name);
     std::vector<std::string> extra;
     for (const std::string &n : src.names())
         if (n.rfind("model.visual.", 0) == 0 && !expected.count(n)) extra.push_back(n);
@@ -895,18 +895,18 @@ std::vector<StrixwTensor> plan_vision(const Source &src, const VisionDims &vd) {
     return out;
 }
 
-// vision.strixw: the whole tower as exact BF16 copies in its own strixw file:
-// weights.strixw never carries it, so existing downloads stay valid and the server loads it only with
+// vision.faf: the whole tower as exact BF16 copies in its own faf file:
+// weights.faf never carries it, so existing downloads stay valid and the server loads it only with
 // vision = on. Written the same way as the text file: .partial, re-opened and component-hash verified,
 // then renamed.
-void write_vision_strixw(const Source &src, const ConvertOptions &opt, Log &log, int threads, ConvertResult &res) {
+void write_vision_faf(const Source &src, const ConvertOptions &opt, Log &log, int threads, ConvertResult &res) {
     STRIX_CHECK(!opt.vision_config_json.empty(),
                 "convert --vision: vision_config_json is empty - the new file's index must carry the tower config");
-    const std::string final_path = opt.out_dir + "/vision.strixw", partial = final_path + ".partial";
-    std::vector<StrixwTensor> tensors = plan_vision(src, opt.vision_dims);
+    const std::string final_path = opt.out_dir + "/vision.faf", partial = final_path + ".partial";
+    std::vector<FafTensor> tensors = plan_vision(src, opt.vision_dims);
     uint64_t out_bytes = 0, src_bytes = 0;
-    for (StrixwTensor &t : tensors) {
-        t.components = strixw_components(t);
+    for (FafTensor &t : tensors) {
+        t.components = faf_components(t);
         out_bytes += t.bytes();
         src_bytes += src.info(t.name).byte_length;
     }
@@ -926,7 +926,7 @@ void write_vision_strixw(const Source &src, const ConvertOptions &opt, Log &log,
         {"depth", std::to_string(opt.vision_dims.depth)},
         {"complete", "yes"},
         {"format_note", "vision tower (0.45B): BF16 exact copies; the text weights file does not contain them"}};
-    StrixwWriter writer(partial, meta, tensors);
+    FafWriter writer(partial, meta, tensors);
     log("writing %s (%s, %zu tensors)", partial.c_str(), fmt_bytes((double)writer.file_bytes()).c_str(),
         tensors.size());
     const auto tv0 = Clock::now();
@@ -934,14 +934,14 @@ void write_vision_strixw(const Source &src, const ConvertOptions &opt, Log &log,
         const TensorInfo &ti = src.info(tensors[i].name);
         std::vector<uint8_t> b(ti.byte_length);
         src.read(tensors[i].name, 0, ti.byte_length, b.data());
-        writer.write(i, StrixwRole::Data, b.data(), b.size());
+        writer.write(i, FafRole::Data, b.data(), b.size());
         if (i < 3 || i + 1 == tensors.size() || (i + 1) % 100 == 0)
             log("  %-8s %-56s %-16s %10s", "bf16", tensors[i].name.c_str(), shape_str(ti.shape).c_str(),
                 fmt_bytes((double)ti.byte_length).c_str());
     }
     writer.finish();
     {
-        const StrixwFile check(partial);
+        const FafFile check(partial);
         STRIX_CHECK(check.tensors().size() == tensors.size(), "convert --vision: the written file has ",
                     check.tensors().size(), " tensors, planned ", tensors.size());
         STRIX_CHECK(check.meta("kind") == "vision", "convert --vision: kind metadata ", check.meta("kind"));
@@ -986,31 +986,31 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         STRIX_CHECK(opt.vision, "convert --tower-only: the tower file is exactly what --vision writes, "
                     "set both (or run the full conversion with --vision)");
         STRIX_CHECK(!opt.plan_only, "convert --tower-only --plan: --plan already logs the tower's tensors");
-        const std::string vpath = opt.out_dir + "/vision.strixw";
+        const std::string vpath = opt.out_dir + "/vision.faf";
         STRIX_CHECK(!fs::exists(vpath), "convert --tower-only: '", vpath, "' already exists - remove it "
                     "first (the converter never overwrites a finished file)");
         fs::create_directories(opt.out_dir);
         Source tsrc(opt.src_dir);
-        log.rule("strix-infer converter \u00b7 tower only (vision.strixw)");
+        log.rule("strix-infer converter \u00b7 tower only (vision.faf)");
         log("  %zu shards, %s of tensor data, fingerprint %s", tsrc.shards(),
             fmt_bytes((double)tsrc.bytes()).c_str(), tsrc.fingerprint().c_str());
-        write_vision_strixw(tsrc, opt, log, threads, res);
+        write_vision_faf(tsrc, opt, log, threads, res);
         res.seconds = log.elapsed();
         return res;
     }
-    const std::string final_path = opt.out_dir + "/weights.strixw", partial = final_path + ".partial";
+    const std::string final_path = opt.out_dir + "/weights.faf", partial = final_path + ".partial";
     if (!opt.plan_only) {
         STRIX_CHECK(!fs::exists(final_path), "convert: '", final_path,
                     "' already exists - remove it first (the converter never overwrites a finished file)");
         if (opt.vision)
-            STRIX_CHECK(!fs::exists(opt.out_dir + "/vision.strixw"), "convert: '", opt.out_dir,
-                        "/vision.strixw' already exists - remove it first (the converter never overwrites a finished file)");
+            STRIX_CHECK(!fs::exists(opt.out_dir + "/vision.faf"), "convert: '", opt.out_dir,
+                        "/vision.faf' already exists - remove it first (the converter never overwrites a finished file)");
         const bool fresh = !fs::exists(opt.out_dir);
         fs::create_directories(opt.out_dir);
         log.open_file(opt.out_dir + "/convert.log");
         if (fresh) set_no_compression(opt.out_dir, log);
     }
-    log.rule("strix-infer converter \u00b7 Qwen3.8-Flash-Next (qwen4exp) -> strixw v" + std::to_string(kStrixwVersion));
+    log.rule("strix-infer converter \u00b7 Qwen3.8-Flash-Next (qwen4exp) -> faf v" + std::to_string(kFafVersion));
     log("layout: %s", layout.c_str());
     log("converter git %s, %d threads", opt.git.c_str(), threads);
 
@@ -1029,10 +1029,10 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
     const ConvertPlan plan = make_plan(src, opt);
     uint64_t planned_src = 0, planned_out = 0, skipped_bytes = 0;
     std::map<std::string, std::pair<int, uint64_t>> by_op;
-    std::vector<StrixwTensor> outs;
+    std::vector<FafTensor> outs;
     for (const ConvertStep &s : plan.steps) {
-        StrixwTensor t = s.out;
-        t.components = strixw_components(t);
+        FafTensor t = s.out;
+        t.components = faf_components(t);
         for (const std::string &n : s.sources)
             if (!n.empty()) planned_src += src.info(n).byte_length;
         planned_out += t.bytes();
@@ -1065,7 +1065,7 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         for (const ConvertStep &s : plan.steps)
             log("  %-9s %-62s %s", convert_op_name(s.op), s.out.name.c_str(), shape_str(s.out.shape).c_str());
         if (opt.vision)
-            for (const StrixwTensor &t : plan_vision(src, opt.vision_dims))
+            for (const FafTensor &t : plan_vision(src, opt.vision_dims))
                 log("  %-9s %-62s %s", "bf16-vis", t.name.c_str(), shape_str(t.shape).c_str());
         log("plan only: nothing written");
         res.seconds = log.elapsed();
@@ -1092,7 +1092,7 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         {"mtp_source", mtp_source.empty() ? "checkpoint" : mtp_source},
         {"complete", complete ? "yes" : "no"},
         {"format_note", "embedding BF16 (not layout A's int8); n-gram table not included (OPEN)"}};
-    StrixwWriter writer(partial, meta, outs);
+    FafWriter writer(partial, meta, outs);
     log.blank();
     log.rule("convert");
     log("writing %s (%s, %zu tensors; header + index %s)", partial.c_str(),
@@ -1123,10 +1123,10 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         }
         const bool merged = s.out.parts.size() > 1;
         // Each explanation once (keyed on its text), the first time a step needs it.
-        const bool q8 = s.out.encoding == StrixwEncoding::Q8RowMajor || s.out.encoding == StrixwEncoding::Q8ChunkMajor;
+        const bool q8 = s.out.encoding == FafEncoding::Q8RowMajor || s.out.encoding == FafEncoding::Q8ChunkMajor;
         const int bits = q8                                              ? 8
-                         : s.out.encoding == StrixwEncoding::Q6RowMajor ? 6
-                         : s.out.encoding == StrixwEncoding::Q5RowMajor ? 5
+                         : s.out.encoding == FafEncoding::Q6RowMajor ? 6
+                         : s.out.encoding == FafEncoding::Q5RowMajor ? 5
                                                                         : 4;
         const std::string note = explain(s.op, merged, s.out.experts, bits);
         if (explained_kinds.insert(note).second) log.note(note);
@@ -1137,7 +1137,7 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         for (const std::string &n : s.sources)
             if (!n.empty()) step_src += src.info(n).byte_length;
         double err = -1;
-        const StrixwTensor &planned = writer.tensors()[si];
+        const FafTensor &planned = writer.tensors()[si];
 
         if (s.op == ConvertOp::Q4Merge || s.op == ConvertOp::Q4ChunkMajor || s.op == ConvertOp::Q4FoldHC) {
           // Generic over the weight type: Q4 or Q8, every op (merged rows, the HC fold, chunk-major).
@@ -1150,7 +1150,7 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
                 const std::vector<float> norm = src.read_f32(s.sources[2]);
                 std::vector<float> di((size_t)(N * K));
                 int64_t row = 0;
-                for (const StrixwPart &p : s.out.parts) {
+                for (const FafPart &p : s.out.parts) {
                     const std::vector<float> w = src.read_f32(p.source);
                     for (int64_t i = 0; i < p.rows; ++i, ++row)
                         for (int64_t k = 0; k < K; ++k)
@@ -1160,11 +1160,11 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
                 err = sampled_error(q, [&](int64_t r, float *dst) { std::memcpy(dst, &di[(size_t)(r * K)], K * 4); });
             } else {
                 // Stream each part in ~256 MB chunks: the next chunk is read while this one quantizes.
-                std::vector<StrixwPart> parts = s.out.parts;
+                std::vector<FafPart> parts = s.out.parts;
                 if (parts.empty()) parts.push_back({s.sources[0], 0, N});
                 const int64_t chunk_rows = std::max<int64_t>(1, (int64_t)(kChunkBytes / (size_t)(K * 2)));
                 std::vector<uint16_t> buf[2];
-                for (const StrixwPart &p : parts) {
+                for (const FafPart &p : parts) {
                     auto read = [&, name = p.source](int64_t r0, int64_t n, std::vector<uint16_t> &b) {
                         b.resize((size_t)(n * K));
                         src.read(name, (uint64_t)(r0 * K * 2), (size_t)(n * K * 2), b.data());
@@ -1183,7 +1183,7 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
                     }
                 }
                 err = sampled_error(q, [&](int64_t r, float *dst) {
-                    for (const StrixwPart &p : parts)
+                    for (const FafPart &p : parts)
                         if (r >= p.row_offset && r < p.row_offset + p.rows) {
                             std::vector<uint16_t> b((size_t)K);
                             src.read(p.source, (uint64_t)((r - p.row_offset) * K * 2), (size_t)(K * 2), b.data());
@@ -1197,28 +1197,28 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
             if constexpr (!std::is_same_v<W, Q6Weight> && !std::is_same_v<W, Q5Weight>) {  // Q5 / Q6: no chunk-major form
                 if (s.op == ConvertOp::Q4ChunkMajor) {
                     const auto cm = to_chunk_major(q, s.out.name.c_str());  // Q4ChunkMajor or Q8ChunkMajor
-                    writer.write(si, StrixwRole::Q, cm.q.data(), cm.q.size());
-                    writer.write(si, StrixwRole::Scale, cm.scale.data(), cm.scale.size() * 2);
-                    writer.write(si, StrixwRole::Min, cm.minv.data(), cm.minv.size() * 2);
+                    writer.write(si, FafRole::Q, cm.q.data(), cm.q.size());
+                    writer.write(si, FafRole::Scale, cm.scale.data(), cm.scale.size() * 2);
+                    writer.write(si, FafRole::Min, cm.minv.data(), cm.minv.size() * 2);
                     chunk_major_done = true;
                 }
             }
             if (!chunk_major_done) {
-                writer.write(si, StrixwRole::Q, q.q.data(), q.q.size());
-                writer.write(si, StrixwRole::Scale, q.scale.data(), q.scale.size() * 2);
-                writer.write(si, StrixwRole::Min, q.minv.data(), q.minv.size() * 2);
+                writer.write(si, FafRole::Q, q.q.data(), q.q.size());
+                writer.write(si, FafRole::Scale, q.scale.data(), q.scale.size() * 2);
+                writer.write(si, FafRole::Min, q.minv.data(), q.minv.size() * 2);
             }
           };
-          if (planned.encoding == StrixwEncoding::Q8RowMajor || planned.encoding == StrixwEncoding::Q8ChunkMajor) {
-              STRIX_CHECK((planned.encoding == StrixwEncoding::Q8ChunkMajor) == (s.op == ConvertOp::Q4ChunkMajor),
-                          "convert: '", s.out.name, "': chunk-major encoding ", strixw_encoding_name(planned.encoding),
+          if (planned.encoding == FafEncoding::Q8RowMajor || planned.encoding == FafEncoding::Q8ChunkMajor) {
+              STRIX_CHECK((planned.encoding == FafEncoding::Q8ChunkMajor) == (s.op == ConvertOp::Q4ChunkMajor),
+                          "convert: '", s.out.name, "': chunk-major encoding ", faf_encoding_name(planned.encoding),
                           " for op ", convert_op_name(s.op));
               quantize_step(Q8Weight{});
-          } else if (planned.encoding == StrixwEncoding::Q6RowMajor) {
+          } else if (planned.encoding == FafEncoding::Q6RowMajor) {
               STRIX_CHECK(s.op != ConvertOp::Q4ChunkMajor, "convert: '", s.out.name, "': Q6 has no chunk-major form (op ",
                           convert_op_name(s.op), ")");
               quantize_step(Q6Weight{});
-          } else if (planned.encoding == StrixwEncoding::Q5RowMajor) {
+          } else if (planned.encoding == FafEncoding::Q5RowMajor) {
               STRIX_CHECK(s.op != ConvertOp::Q4ChunkMajor, "convert: '", s.out.name, "': Q5 has no chunk-major form (op ",
                           convert_op_name(s.op), ")");
               quantize_step(Q5Weight{});
@@ -1234,28 +1234,28 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
                 at += ti.byte_length;
             }
             STRIX_CHECK(at == b.size(), "convert: '", s.out.name, "' got ", at, " bytes, planned ", b.size());
-            writer.write(si, StrixwRole::Data, b.data(), b.size());
+            writer.write(si, FafRole::Data, b.data(), b.size());
         } else if (s.op == ConvertOp::F32Widen) {
             const std::vector<float> f = src.read_f32(s.sources[0]);
-            writer.write(si, StrixwRole::Data, f.data(), f.size() * 4);
+            writer.write(si, FafRole::Data, f.data(), f.size() * 4);
         } else {
             const std::vector<int64_t> v = src.read_all<int64_t>(s.sources[0]);
-            writer.write(si, StrixwRole::Data, v.data(), v.size() * 8);
+            writer.write(si, FafRole::Data, v.data(), v.size() * 8);
         }
 
         const double dt = std::chrono::duration<double>(Clock::now() - ts).count();
         done_src += step_src, done_out += planned.bytes();
         std::string from;
         if (merged || s.op == ConvertOp::Q4FoldHC) {
-            for (const StrixwPart &p : s.out.parts)
+            for (const FafPart &p : s.out.parts)
                 from += (from.empty() ? "" : " + ") + short_name(p.source) + shape_str(src.info(p.source).shape);
             if (s.op == ConvertOp::Q4FoldHC) from += " * (1 + hc_norm)";
             log("  %-8s %s <- %s", step_tag(s).c_str(), short_name(s.out.name).c_str(), from.c_str());
         }
         char q4info[96] = "";
-        if (planned.encoding == StrixwEncoding::Q4RowMajor || planned.encoding == StrixwEncoding::Q4ChunkMajor ||
-            planned.encoding == StrixwEncoding::Q8RowMajor || planned.encoding == StrixwEncoding::Q8ChunkMajor ||
-            planned.encoding == StrixwEncoding::Q6RowMajor || planned.encoding == StrixwEncoding::Q5RowMajor)
+        if (planned.encoding == FafEncoding::Q4RowMajor || planned.encoding == FafEncoding::Q4ChunkMajor ||
+            planned.encoding == FafEncoding::Q8RowMajor || planned.encoding == FafEncoding::Q8ChunkMajor ||
+            planned.encoding == FafEncoding::Q6RowMajor || planned.encoding == FafEncoding::Q5RowMajor)
             std::snprintf(q4info, sizeof q4info, "  %.2f bpw  err %.2f%%", 8.0 * (double)planned.bytes() / (double)planned.numel(),
                           100 * err);
         log("  %-8s %-44s %-16s %10s%s  %6.2fs  %s/s", step_tag(s).c_str(),
@@ -1285,7 +1285,7 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         threads);
     const auto tv = Clock::now();
     {
-        const StrixwFile check(partial);
+        const FafFile check(partial);
         STRIX_CHECK(check.tensors().size() == plan.steps.size(), "convert: the written file has ",
                     check.tensors().size(), " tensors, planned ", plan.steps.size());
         check.verify_hashes(threads);
@@ -1299,7 +1299,7 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         fmt_bytes((double)planned_out / std::max(1e-9, vt)).c_str());
     fs::rename(partial, final_path);
     res.weights_path = final_path;
-    if (opt.vision) write_vision_strixw(src, opt, log, threads, res);
+    if (opt.vision) write_vision_faf(src, opt, log, threads, res);
     res.seconds = log.elapsed();
     log("\u2714 done: %s -> %s, %zu tensors, %s in %s", fmt_bytes((double)planned_src).c_str(), final_path.c_str(),
         plan.steps.size(), fmt_bytes((double)planned_out).c_str(), fmt_dur(res.seconds).c_str());

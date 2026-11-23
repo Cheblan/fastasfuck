@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <vector>
 #include <string>
@@ -46,15 +47,22 @@ int main(int argc, char **argv) {
     printf("Config: %s\n", conf_path.c_str());
     fflush(stdout);
 
-    ServerSettings settings(strix_server_options("/models"));
+    ServerSettings settings(fastasfuck_server_options("/models"));
     settings.load({"--config", conf_path});
 
+    namespace fs = std::filesystem;
     const std::string weights = settings.text("weights");
     const std::string ngram = settings.text("ngram");
     const std::string tok_path = settings.text("tokenizer");
-    const std::string vision_path = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/vision.strixw";
-    const std::string preproc_cfg = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/preprocessor_config.json";
-    const std::string model_cfg = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/config.json";
+
+    fs::path model_dir = fs::path(weights).parent_path();
+    fs::path vpath = model_dir / "vision.faf";
+    if (!fs::exists(vpath) && fs::exists(model_dir / "vision.strixw")) {
+        vpath = model_dir / "vision.strixw";
+    }
+    const std::string vision_path = vpath.string();
+    const std::string preproc_cfg = (model_dir / "preprocessor_config.json").string();
+    const std::string model_cfg = (model_dir / "config.json").string();
 
     const int64_t capacity = 65536;
     const int64_t chunk = 16384;
@@ -129,7 +137,8 @@ int main(int argc, char **argv) {
 
     std::vector<int64_t> counts;
     for (const auto &im : served_images) counts.push_back(im.merged_tokens);
-    std::vector<int32_t> prompt_with_image = {151644, 872, 198, sv.image_token_id, 151645, 198, 151646, 198};
+    // Pad to ensure total prompt tokens (text + image) align to QSA block boundary (pos % 4 == 0)
+    std::vector<int32_t> prompt_with_image = {151644, 872, 198, sv.image_token_id, 151645, 198, 151646, 198, 198};
     prompt_with_image = vision::expand_image_pads(prompt_with_image, sv.image_token_id, counts);
 
     vision::VisionPromptPlan plan = vision::plan_vision_prompt(prompt_with_image, served_images, sv.cfg,

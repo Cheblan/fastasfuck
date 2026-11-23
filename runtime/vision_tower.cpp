@@ -36,14 +36,14 @@ std::vector<float> widen_f32(const uint16_t *bits, int64_t n) {
 
 }  // namespace
 
-VisionTower::VisionTower(const std::string &path, const StrixwFile &text_weights, kernels::Act act)
+VisionTower::VisionTower(const std::string &path, const FafFile &text_weights, kernels::Act act)
     : path_(path), act_(act) {
     const char *fn = "VisionTower";
     STRIX_CHECK(act == kernels::Act::F32 || act == kernels::Act::BF16, fn, ": unsupported activation dtype ",
                 (int)act);
     // Headers first (a cheap mmap): refuse a file that isn't this tower before its 856 MiB go to the
     // device - a text weights file named as the vision file fails here, not as a half-loaded model.
-    const StrixwFile index(path);
+    const FafFile index(path);
     STRIX_CHECK(index.meta("arch") == "qwen4exp" && index.meta("kind") == "vision", fn, ": '", path,
                 "' is arch '", index.meta("arch"), "', kind '", index.meta("kind"), "' - expected a qwen4exp",
                 " vision conversion (tools/convert_qwen4exp --vision)");
@@ -57,16 +57,16 @@ VisionTower::VisionTower(const std::string &path, const StrixwFile &text_weights
     // Always the plain Device placement, whatever the text model asked for: HostExperts is a loader
     // contract about the expert stacks (it refuses a file that has none), and the tower has no experts -
     // 856 MiB of BF16 is a device region on every machine.
-    w_ = std::make_unique<StrixwDevice>(path, 8, WeightPlacement::Device);
-    const StrixwFile &f = w_->file();
+    w_ = std::make_unique<FafDevice>(path, 8, WeightPlacement::Device);
+    const FafFile &f = w_->file();
 
     // Dimensions from the tensor shapes: hidden and the pixel width from the patch embed, the MLP width
     // and the merge from the block / merger matrices, the position-table side from its row count.
     const auto shape_of = [&](const std::string &name) -> const std::vector<int64_t> & {
-        const StrixwTensor *t = f.find(name);
+        const FafTensor *t = f.find(name);
         STRIX_CHECK(t != nullptr, fn, ": '", path, "' has no tensor '", name, "'");
-        STRIX_CHECK(t->encoding == StrixwEncoding::BF16, fn, ": '", name, "' encoding ",
-                    strixw_encoding_name(t->encoding), ", expected bf16");
+        STRIX_CHECK(t->encoding == FafEncoding::BF16, fn, ": '", name, "' encoding ",
+                    faf_encoding_name(t->encoding), ", expected bf16");
         return t->shape;
     };
     const std::vector<int64_t> &pe = shape_of(kV + "patch_embed.proj.weight");
@@ -173,7 +173,7 @@ VisionTower::VisionTower(const std::string &path, const StrixwFile &text_weights
                               "mlp.linear_fc2.bias", "norm1.weight", "norm1.bias", "norm2.weight",
                               "norm2.bias"})
             known.insert(kV + "blocks." + std::to_string(b) + "." + s);
-    for (const StrixwTensor &t : f.tensors())
+    for (const FafTensor &t : f.tensors())
         STRIX_CHECK(known.count(t.name) != 0, fn, ": '", path, "' carries '", t.name,
                     "', which this tower code doesn't read - refusing a file with unaccounted tensors");
 }

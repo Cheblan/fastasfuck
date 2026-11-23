@@ -20,8 +20,8 @@ from typing import Dict, List, Any, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import STANDARD_PROMPTS, warmup_server, query_chat_stream, query_chat_nonstream, summarize_series
 
-CONF_PATH = "/home/cheblan/strix-server-hybrid.conf"
-SERVER_BIN = "/home/cheblan/strixite-main/build/strix/strix_server"
+CONF_PATH = "/home/cheblan/fastasfuck-server.conf"
+SERVER_BIN = "/home/cheblan/fastasfuck-main/build/strix/fastasfuck_server"
 URL = "http://127.0.0.1:5300"
 
 CORPUS_CHUNK = (
@@ -35,13 +35,13 @@ def build_context(target_tokens: int, nonce: str = "") -> str:
     return f"Contention Workload [{nonce}]:\n\n" + (CORPUS_CHUNK * reps) + "\n\nSummarize scheduling."
 
 def restart_server_tmux(chunk: int, chunk_shared: int):
-    """Safely restarts strix_server inside tmux session 'strix' with explicit chunk settings."""
+    """Safely restarts fastasfuck_server inside tmux session 'strix' with explicit chunk settings."""
     print(f"\n[SERVER] Restarting server in tmux with --chunk {chunk} --chunk-shared {chunk_shared}...")
     
     # Send kill to old instance
     subprocess.run(["tmux", "send-keys", "-t", "strix", "C-c", ""], capture_output=True)
     time.sleep(1)
-    subprocess.run(["pkill", "-9", "-f", "strix_server"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", "fastasfuck_server"], capture_output=True)
     time.sleep(2)
     
     # Start fresh session with bash
@@ -251,7 +251,7 @@ def run_chunk_pareto_suite(output_json: str = None):
         print(f"[REPORT] Saved full Pareto report to: {output_json}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Strixite 2-Phase Chunk & Chunk-Shared Pareto Sweep")
+    parser = argparse.ArgumentParser(description="fastasfuck 2-Phase Chunk & Chunk-Shared Pareto Sweep")
     parser.add_argument("--output", default="benchmark_chunk_pareto.json", help="Path to save report")
     args = parser.parse_args()
 

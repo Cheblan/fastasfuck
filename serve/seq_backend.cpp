@@ -217,7 +217,7 @@ void GpuArbiter::run_batch(std::unique_lock<std::mutex> &lock) {
         const Pending &p = pending_[s];
         const int64_t r = (int64_t)p.run.ids.size();
         // A run that can't share a forward (LmBackend::batchable: image rows, mRoPE positions) goes alone: it
-        // leads a batch of one when it is the oldest, and otherwise waits for the next batch (strixite #29: both
+        // leads a batch of one when it is the oldest, and otherwise waits for the next batch (upstream #29: both
         // requests of a mixed batch failed the multi-run forward's scalar-positions check).
         if (!runs.empty() && (!p.batchable || rows + r > budget || p.cands != cands || p.n_valid != n_valid)) continue;
         if (runs.empty()) cands = p.cands, n_valid = p.n_valid;

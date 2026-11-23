@@ -1019,7 +1019,7 @@ int64_t qsa_topk_filter_fallbacks(void *workspace, size_t workspace_bytes, hipSt
 TopkPath qsa_topk_auto_path(int64_t T, int64_t nb) {
     STRIX_CHECK(T >= 1 && nb >= 0, "qsa_topk_auto_path: T = ", T, ", nb = ", nb, " (expected T >= 1, nb >= 0)");
     if (nb <= kQsaTopkRowMaxBlocks) return TopkPath::Row;
-    return T <= kQsaTopkRowMaxT ? TopkPath::Split : TopkPath::Filter;  // never Coop (strixite #31: coop launch hangs when other streams share GPU)
+    return T <= kQsaTopkRowMaxT ? TopkPath::Split : TopkPath::Filter;  // never Coop (upstream #31: coop launch hangs when other streams share GPU)
 }
 
 void qsa_topk(const float *scores, int64_t ld, int64_t T, int64_t pos0, int64_t k, int32_t *sel, int32_t *nsel,
@@ -1057,7 +1057,7 @@ void qsa_topk(const float *scores, int64_t ld, int64_t T, int64_t pos0, int64_t 
         STRIX_HIP_CHECK_LAUNCH(fn, " filter exact T=", T, " pos0=", pos0, " k=", k);
         return;
     }
-    // Explicit Coop only: cooperative launch requires all workgroups resident simultaneously. Auto never picks it (strixite #31).
+    // Explicit Coop only: cooperative launch requires all workgroups resident simultaneously. Auto never picks it (upstream #31).
     if (path == TopkPath::Coop) {
         STRIX_CHECK(small_t, fn, ": the coop path takes T <= ", kQsaTopkRowMaxT, ", got T = ", T);
         const int64_t W = std::clamp<int64_t>(std::min<int64_t>((nb + kTopkChunk - 1) / kTopkChunk,

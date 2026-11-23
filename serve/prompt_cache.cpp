@@ -2,7 +2,7 @@
 #include "serve/log.hpp"
 
 #include "common/check.hpp"
-#include "formats/strixw.hpp"  // strix_hash64
+#include "formats/faf.hpp"  // strix_hash64
 
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -976,7 +976,7 @@ PromptCache::RoomGrant PromptCache::make_room_for(uint64_t bytes, const RetiredR
         // Refused only when nothing is on its way out and nothing more can leave. With several slots, the pass above
         // can count another caller's eviction as this one's room and evict nothing; that write then finishes and the
         // other caller takes the RAM - nothing leaving, room still short, entries free to leave: run the rule again
-        // on a fresh reading rather than refuse (strixite #42).
+        // on a fresh reading rather than refuse (upstream #42).
         const bool leaving = leaving_bytes_locked() > 0;
         if (left <= 0 || (!leaving && !evictable_locked())) {
             ++stats_.room_refused;
@@ -1387,7 +1387,7 @@ bool PromptCache::with_paged(const std::vector<int32_t> &prompt, int64_t n,
         if (const int i = find_locked(prompt.data(), n); i >= 0) {
             Entry &f = *entries_[(size_t)i];
             // Pinned for the call: an eviction or a finishing write must not take the pages back from under a
-            // resume that is mapping them (the same reason a RAM read holds its readers count - strixite #14).
+            // resume that is mapping them (the same reason a RAM read holds its readers count - upstream #14).
             if (!f.paged.empty() && f.readers == 0 && !f.queued) {
                 f.last_used = ++clock_, f.touched_s = now_s(), f.no_room = false;
                 ++f.readers, e = entries_[(size_t)i];
@@ -1587,7 +1587,7 @@ void PromptCache::write_entry(Job &job) {
             // Its file has the state now, so holding the copy is pure cost: the pages go back to their owner and
             // the small bytes with them (half a state is not a state - with_state would refuse it anyway). If a
             // read took it meanwhile the drop defers to its last release, as a whole entry's eviction does
-            // (strixite #14) - the pages must not go while someone is mapping them into a slot.
+            // (upstream #14) - the pages must not go while someone is mapping them into a slot.
             e.drop_ram = true;
             if (e.readers == 1) drop_ram_locked(e, true);
         }
@@ -1613,7 +1613,7 @@ void PromptCache::write_entry(Job &job) {
              delta.c_str());
         if (e.drop_ram && e.readers > 1)
             slog(LogLevel::Info, "prompt cache: the %s-token entry's eviction write finished while a read still holds "
-                 "its RAM - the RAM leaves when the read does", fmt_n((long long)n).c_str());  // strixite #14
+                 "its RAM - the RAM leaves when the read does", fmt_n((long long)n).c_str());  // upstream #14
     }
     release_locked(e);  // the last reader's release also finishes a deferred drop_ram (see release_locked)
     ++stats_.writes, stats_.bytes_written += (int64_t)total, stats_.write_seconds += now_s() - t0;

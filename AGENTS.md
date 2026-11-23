@@ -2,7 +2,7 @@
 
 ## 1. Project Manifesto and Lineage
 
-This repository is an **independent, autonomous hard fork of `strixite`**, branched cleanly from upstream release `v0.7.0` (commit `0945ce8`).
+This repository is **fastasfuck**, an independent, production-grade LLM inference engine engineered specifically for AMD Strix Halo unified memory architecture under heavy, concurrent multi-agent workloads.
 
 ### Why We Forked
 1. **Rejection of Upstream Closed Development:** Upstream operates via an opaque private repository (`strix-infer`) and periodically dumps monolithic `sync` commits into public GitHub, rejecting community pull requests (`CONTRIBUTING.md: issues only, no pull requests`).
@@ -64,7 +64,7 @@ ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepag
 - **Layer Stack:** 48 hybrid layers (GDN linear attention + QSA windowed attention).
 - **MoE Routing:** 512 fine-grained experts, top-k = 10 routing per token.
 - **Speculative Acceleration:** Multi-Token Prediction (MTP) with decoupled draft heads and n-gram table assist.
-- **Weight Footprint:** ~65.9 GiB packed in `.strixw` format.
+- **Weight Footprint:** ~65.5 GiB packed in `.faf` format.
 
 ---
 

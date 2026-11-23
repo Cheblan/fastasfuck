@@ -241,12 +241,12 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
     const PromptCache::Options cache;
     const std::string ckpt = models_dir + "/Qwen3.8-Flash-Next";
     return {
-        {"weights", K::Path, 0, 0, models_dir + "/converted/Qwen3.8-Flash-Next.U-gdn_in-g128/weights.strixw",
-         "converted weights (strixw); the shipping layout U - gdn_in - g128 by default"},
+        {"weights", K::Path, 0, 0, models_dir + "/converted/Qwen3.8-Flash-Next.U-gdn_in-g128/weights.faf",
+         "converted weights (.faf); the shipping layout U - gdn_in - g128 by default"},
         {"ngram", K::Path, 0, 0, models_dir + "/converted/Qwen3.8-Flash-Next.ngram-q8/ngram.table",
          "the n-gram table (int8 rows)"},
         {"vision", K::OnOff, 0, 0, "on",
-         "image input: load vision.strixw from the weights' directory, allow image parts "
+         "image input: load vision.faf or vision.strixw from the weights' directory, allow image parts "
          "(data: URLs only); off keeps image parts the 400, loads no tower, and serves no image kernels"},
         {"vision-preprocess-limit", K::Int, 1, 16, "2",
          "how many images may decode / resize / pack at once (on the request threads; each one's worst case "
@@ -260,7 +260,7 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
         {"request-read-timeout-s", K::Int, 1, 3600, "30",
          "seconds a connection may go silent while its request body is still arriving before the read is abandoned "
          "and a retryable 408 goes out; per-read inactivity, not total upload time (httplib's default was 5 s, too "
-         "short for multi-MB histories over weak Wi-Fi - strixite #15)"},
+         "short for multi-MB histories over weak Wi-Fi - upstream #15)"},
         {"slot-capacity", K::Int, 4096, 1 << 20, "524288",
          "positions per slot/session (at most 262144 x rope-yarn-factor)"},
         {"capacity", K::Int, 4096, 1 << 20, "524288",

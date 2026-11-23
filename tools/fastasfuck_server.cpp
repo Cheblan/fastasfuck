@@ -42,21 +42,21 @@ std::string models_dir() {
     const char *env = std::getenv("STRIX_MODELS_DIR");
     if (env && *env) return env;
     const char *home = std::getenv("HOME");
-    STRIX_CHECK(home && *home, "strix_server: neither STRIX_MODELS_DIR nor HOME is set");
+    STRIX_CHECK(home && *home, "fastasfuck_server: neither STRIX_MODELS_DIR nor HOME is set");
     return std::string(home) + "/models/strix-infer";
 }
 
 // generation_config.json's sampling defaults (temperature, top_k, top_p); every one must be there.
 SamplingParams sampling_defaults(const std::string &path) {
     std::ifstream f(path, std::ios::binary);
-    STRIX_CHECK(f.good(), "strix_server: can't open generation config '", path, "'");
+    STRIX_CHECK(f.good(), "fastasfuck_server: can't open generation config '", path, "'");
     std::ostringstream ss;
     ss << f.rdbuf();
     const json::Value g = json::Value::parse(ss.str());
     SamplingParams p;
     const auto need = [&](const char *k) -> const json::Value & {
         const json::Value *v = g.find(k);
-        STRIX_CHECK(v != nullptr, "strix_server: '", path, "' has no '", k, "'");
+        STRIX_CHECK(v != nullptr, "fastasfuck_server: '", path, "' has no '", k, "'");
         return *v;
     };
     p.temperature = need("temperature").as_double(path + ".temperature");
@@ -71,7 +71,7 @@ void on_signal(int) {
 }
 
 // Exit status after a GpuFatalError (the GPU context is lost): non-zero, so systemd's Restart=on-failure (or any
-// supervisor) starts a fresh process - the only recovery (strixite issue #6).
+// supervisor) starts a fresh process - the only recovery (upstream issue #6).
 constexpr int kExitGpuFatal = 3;
 // Exit status when the startup memory check refuses (low-memory = fail): deploy/strix-server.service names it in
 // RestartPreventExitStatus - a restart would load the weights again only to refuse again.
@@ -130,10 +130,10 @@ void run_system_preflight_checks() {
 }
 
 int run(int argc, char **argv) {
-    ServerSettings settings(strix_server_options(models_dir()));
+    ServerSettings settings(fastasfuck_server_options(models_dir()));
     settings.load(std::vector<std::string>(argv + 1, argv + argc));
     if (settings.help()) {
-        std::fputs(settings.usage("strix_server").c_str(), stdout);
+        std::fputs(settings.usage("fastasfuck_server").c_str(), stdout);
         return 0;
     }
     if (settings.print_config()) {
@@ -223,7 +223,7 @@ int run(int argc, char **argv) {
     const uint32_t filter_mask = vocab_filter::parse_filter(vocab_filter_spec);
     const bool is_filtered = !vocab_filter::is_all(filter_mask);
     if (is_filtered) {
-        STRIX_CHECK(mtp_vocab == 0, "strix_server: --mtp-vocab-filter cannot be combined with nonzero --mtp-vocab (got ",
+        STRIX_CHECK(mtp_vocab == 0, "fastasfuck_server: --mtp-vocab-filter cannot be combined with nonzero --mtp-vocab (got ",
                     mtp_vocab, "); use --mtp-vocab 0 with filtering");
     }
 
@@ -235,9 +235,11 @@ int run(int argc, char **argv) {
     const std::string vision_weights = [&] {
         if (!vision) return std::string();
         const size_t slash = weights.rfind('/');
-        STRIX_CHECK(slash != std::string::npos && slash > 0, "strix_server: --weights '", weights,
-                    "' is not a plain path - can't find the sibling vision.strixw");
-        return weights.substr(0, slash) + "/vision.strixw";
+        STRIX_CHECK(slash != std::string::npos && slash > 0, "fastasfuck_server: --weights '", weights,
+                    "' is not a plain path - can't find sibling vision.faf or vision.strixw");
+        const std::string dir = weights.substr(0, slash);
+        if (std::filesystem::exists(dir + "/vision.faf")) return dir + "/vision.faf";
+        return dir + "/vision.strixw";
     }();
     // Before the ~30 s weight load: a missing tower file is a setup mistake, named with both ways out.
     if (vision) {
@@ -245,7 +247,7 @@ int run(int argc, char **argv) {
         const std::string pp = ts == std::string::npos ? std::string("preprocessor_config.json")
                                                        : tokenizer.substr(0, ts) + "/preprocessor_config.json";
         for (const std::string &need : {vision_weights, pp})
-            STRIX_CHECK(std::filesystem::is_regular_file(need), "strix_server: vision = on but ", need,
+            STRIX_CHECK(std::filesystem::is_regular_file(need), "fastasfuck_server: vision = on but ", need,
                         " is missing - download it from the weights repo (re-running the download fetches only the new "
                         "files), or set vision = off");
     }
@@ -259,7 +261,7 @@ int run(int argc, char **argv) {
              (double)model.rope_scale());
     slog(LogLevel::Info, "startup: %.1f GiB of weights loaded in %.1f s",
                  (double)model.weights().data_bytes() / (1ull << 30), model.weights().load_seconds());
-    // MTP drafts score a compact / Q4 copy of the draft vocabulary's LM head rows (Qwen4ExpModel::make_draft_head; strixite
+    // MTP drafts score a compact / Q4 copy of the draft vocabulary's LM head rows (Qwen4ExpModel::make_draft_head; upstream
     // PR #2): saves memory bandwidth per draft call, the verify still decides every token.
     if (use_mtp && model.has_mtp()) {
         const auto t0 = std::chrono::steady_clock::now();
@@ -286,9 +288,9 @@ int run(int argc, char **argv) {
     }
     std::unique_ptr<vision::ServedVision> served_vision;
     if (vision) {
-        STRIX_CHECK(model.has_vision(), "strix_server: vision = on but the model loaded without a tower");
+        STRIX_CHECK(model.has_vision(), "fastasfuck_server: vision = on but the model loaded without a tower");
         const size_t slash = tokenizer.rfind('/');
-        STRIX_CHECK(slash != std::string::npos && slash > 0, "strix_server: --tokenizer '", tokenizer,
+        STRIX_CHECK(slash != std::string::npos && slash > 0, "fastasfuck_server: --tokenizer '", tokenizer,
                     "' is not a plain path - can't find the checkpoint's config files");
         served_vision = std::make_unique<vision::ServedVision>(vision::load_vision_config(
             tokenizer.substr(0, slash) + "/preprocessor_config.json", tokenizer.substr(0, slash) + "/config.json",
@@ -297,7 +299,7 @@ int run(int argc, char **argv) {
         // request path expands the checkpoint's own image_token_id. Two sources of truth - they must agree,
         // or every image forward fails later with a row-count message. Fail at startup naming both.
         STRIX_CHECK(served_vision->image_token_id == kVisionImageTokenId,
-                    "strix_server: config.json image_token_id = ", (int)served_vision->image_token_id,
+                    "fastasfuck_server: config.json image_token_id = ", (int)served_vision->image_token_id,
                     ", but the runtime scatters merged image rows at id ", (int)kVisionImageTokenId,
                     " (runtime/qwen4exp.hpp kVisionImageTokenId) - this checkpoint's image token is not served");
         served_vision->vision_weights = vision_weights;
@@ -345,7 +347,7 @@ int run(int argc, char **argv) {
     }
     std::string degraded;  // what the memory plan turned down (Engine::Options::degraded)
     {
-        // The startup memory check (serve/memory_plan.hpp, strixite issue #6): every GPU buffer is allocated now.
+        // The startup memory check (serve/memory_plan.hpp, upstream issue #6): every GPU buffer is allocated now.
         int64_t gpu_total = 0;
         for (const auto &c : GpuMemoryTally::snapshot()) gpu_total += c.second;
         const NgramTableRows *table =

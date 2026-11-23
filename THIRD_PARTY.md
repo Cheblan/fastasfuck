@@ -1,6 +1,6 @@
 # Third-party material
 
-strixite was written from scratch. Other engines (llama.cpp's Qwen support and its multi-token-prediction branches,
+fastasfuck was written from scratch. Other engines (llama.cpp's Qwen support and its multi-token-prediction branches,
 among others) were studied as read-only references; the facts were re-derived and written in my own words and code -
 no source, documentation or scripts were copied from them. What this repository does contain from others is listed
 here, each with its license. I've made a careful, good-faith effort to respect every license involved; if you
@@ -9,7 +9,7 @@ believe something here falls short of a license's terms, please open an issue an
 ## cpp-httplib 0.56.0 - MIT
 
 `third_party/cpp-httplib/httplib.h`, by Yuji Hirose, vendored unchanged; its license is in
-`third_party/cpp-httplib/LICENSE`. It serves strixite's HTTP API.
+`third_party/cpp-httplib/LICENSE`. It serves fastasfuck's HTTP API.
 
 ## stb_image 2.30 and stb_image_write 1.16 - public domain (or MIT)
 
@@ -74,9 +74,9 @@ authorization of the copyright holder.
 
 ## Model weights
 
-The model weights that strixite executes are not distributed as part of this repository. The engine server is licensed under AGPL-3.0, whereas licenses for any served model weights, fine-tunes, tokenizers, and derived checkpoints (such as derivatives of [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) published at [wemoh/Qwen3.8-Flash-Next-strixw](https://huggingface.co/wemoh/Qwen3.8-Flash-Next-strixw)) are governed separately by their respective original authors and creators. Please consult the corresponding model repositories and authors directly for their specific licensing terms.
+The model weights that fastasfuck executes are not distributed as part of this repository. The engine server is licensed under AGPL-3.0, whereas licenses for any served model weights, fine-tunes, tokenizers, and derived checkpoints (such as derivatives of [Qwen/Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)) are governed separately by their respective original authors and creators. Please consult the corresponding model repositories and authors directly for their specific licensing terms.
 
 ## Build and test dependencies
 
-Not shipped here; each is installed by whoever builds strixite, under its own license: AMD's ROCm (TheRock) toolchain
+Not shipped here; each is installed by whoever builds fastasfuck, under its own license: Arch Linux native AMD ROCm packages (`rocm-hip-sdk`, `hip-runtime-amd`, `rocm-llvm`), CMake, Ninja, and GCC C++ standard library.
 and HIP runtime, CMake, Ninja, and a GCC C++ standard library.

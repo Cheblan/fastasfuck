@@ -1,5 +1,5 @@
 #include "serve/mtp_calib.hpp"
-#include "formats/strixw.hpp"
+#include "formats/faf.hpp"
 #include "serve/log.hpp"
 #include <algorithm>
 #include <cmath>
@@ -81,7 +81,7 @@ std::string compute_weights_fingerprint(
     if (fd >= 0) {
         uint8_t hdr[128];
         ssize_t rd = ::read(fd, hdr, sizeof(hdr));
-        if (rd == 128 && std::memcmp(hdr, "STRIXWT\0", 8) == 0) {
+        if (rd == 128 && (std::memcmp(hdr, "FASTASFK", 8) == 0 || std::memcmp(hdr, "STRIXWT\0", 8) == 0)) {
             std::memcpy(&header_index_hash, hdr + 48, sizeof(uint64_t));
         }
         ::close(fd);

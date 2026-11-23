@@ -1,17 +1,17 @@
-# strixite's release container image: the server and its tools, built from a release tag with the pinned TheRock
+# fastasfuck's release container image: the server and its tools, built from a release tag with the pinned TheRock
 # ROCm toolchain, on Fedora 43 (the tested distribution). The weights are not in the image - mount the directory you
 # downloaded them to at /models.
 #
-# Third-party libraries and their licenses: /opt/strixite/NOTICE.md and /opt/strixite/licenses/ in the image.
+# Third-party libraries and their licenses: /opt/fastasfuck/NOTICE.md and /opt/fastasfuck/licenses/ in the image.
 #
 # Build it with deploy/container/build-image.sh (it prepares the build context: the source at a git ref and the
 # TheRock tarball, checked against its sha256). Nothing is fetched at build time but the base image and Fedora's
 # packages - the toolchain comes from the context, so a build is reproducible from the same two inputs.
 #
 # Run (podman; docker takes the same flags):
-#   podman run -d --name strixite --device /dev/kfd --device /dev/dri --group-add keep-groups \
+#   podman run -d --name fastasfuck --device /dev/kfd --device /dev/dri --group-add keep-groups \
 #       --security-opt seccomp=unconfined --security-opt label=disable -p 5300:5300 -v ~/models/strix-infer:/models \
-#       ghcr.io/shawnshekari/strixite:TAG
+#       ghcr.io/Cheblan/fastasfuck:TAG
 # (label=disable: SELinux would otherwise keep the container from reading your home directory's files; docs/container.md)
 # The host still needs the kernel parameters from the README's Quick start (the GPU's memory limit) - a container
 # can't set those.
@@ -38,20 +38,20 @@ COPY src/ /src/
 WORKDIR /src
 RUN cmake --preset strix -DSTRIX_DEV_TOOLS=OFF && cmake --build --preset strix
 # The runtime libraries the binaries load, resolved by the loader itself (ldd) rather than listed by hand: everything
-# from the TheRock tree goes into /opt/strixite/lib; the system's own (libc, libstdc++) come from the runtime image.
-RUN set -e; mkdir -p /opt/strixite/bin /opt/strixite/lib; \
-    for b in strix_server inspect_strixw convert_qwen4exp convert_ngram_table transcode_ngram_table; do \
+# from the TheRock tree goes into /opt/fastasfuck/lib; the system's own (libc, libstdc++) come from the runtime image.
+RUN set -e; mkdir -p /opt/fastasfuck/bin /opt/fastasfuck/lib; \
+    for b in fastasfuck_server inspect_faf convert_qwen4exp convert_ngram_table transcode_ngram_table; do \
         test -x build/strix/$b || { echo "Containerfile: build/strix/$b missing after the build"; exit 1; }; \
-        cp build/strix/$b /opt/strixite/bin/; \
-        ldd build/strix/$b | awk '/=> \/root\/tools\/therock-tarball/ {print $3}' | xargs -r -I{} cp -L {} /opt/strixite/lib/; \
+        cp build/strix/$b /opt/fastasfuck/bin/; \
+        ldd build/strix/$b | awk '/=> \/root\/tools\/therock-tarball/ {print $3}' | xargs -r -I{} cp -L {} /opt/fastasfuck/lib/; \
         if ldd build/strix/$b | grep -q "not found"; then echo "Containerfile: $b has unresolved libraries"; ldd build/strix/$b; exit 1; fi; \
     done; \
-    cp deploy/strix-server.conf /opt/strixite/; \
-    cp LICENSE THIRD_PARTY.md /opt/strixite/
-# License texts for every library in /opt/strixite/lib: TheRock's own for the ROCm parts, Fedora's for the upstream
+    cp deploy/strix-server.conf /opt/fastasfuck/; \
+    cp LICENSE THIRD_PARTY.md /opt/fastasfuck/
+# License texts for every library in /opt/fastasfuck/lib: TheRock's own for the ROCm parts, Fedora's for the upstream
 # projects (the directory names match the NOTICE). A package without a license file fails the build.
-COPY NOTICE-image.md /opt/strixite/NOTICE.md
-RUN set -e; L=/opt/strixite/licenses; T=/root/tools/therock-tarball/install/share/doc; \
+COPY NOTICE-image.md /opt/fastasfuck/NOTICE.md
+RUN set -e; L=/opt/fastasfuck/licenses; T=/root/tools/therock-tarball/install/share/doc; \
     for d in hip rocr amd_comgr rocprofiler-register; do \
         test -d $T/$d || { echo "Containerfile: TheRock has no share/doc/$d"; exit 1; }; \
         mkdir -p $L/therock/$d; cp $T/$d/LICENSE* $L/therock/$d/; \
@@ -78,9 +78,9 @@ RUN set -e; L=/opt/strixite/licenses; T=/root/tools/therock-tarball/install/shar
 
 # --- runtime: Fedora's base, the binaries and their TheRock libraries ---
 FROM registry.fedoraproject.org/fedora-minimal:${FEDORA}
-COPY --from=build /opt/strixite /opt/strixite
-ENV LD_LIBRARY_PATH=/opt/strixite/lib \
-    PATH=/opt/strixite/bin:/usr/bin:/bin \
+COPY --from=build /opt/fastasfuck /opt/fastasfuck
+ENV LD_LIBRARY_PATH=/opt/fastasfuck/lib \
+    PATH=/opt/fastasfuck/bin:/usr/bin:/bin \
     STRIX_MODELS_DIR=/models \
     HSA_DISABLE_COREDUMP_ON_EXCEPTION=1
 # (no GPU memory dump into the working directory on a GPU fault - deploy/strix-server.service says why)
@@ -88,4 +88,4 @@ VOLUME /models
 EXPOSE 5300
 # /models: the downloaded weights (hf download ... --local-dir), and the prompt cache's directory (prompt-cache/,
 # created on first use - it must be writable). Any setting can be overridden with flags after the image name.
-ENTRYPOINT ["/opt/strixite/bin/strix_server", "--config", "/opt/strixite/strix-server.conf"]
+ENTRYPOINT ["/opt/fastasfuck/bin/fastasfuck_server", "--config", "/opt/fastasfuck/fastasfuck-server.conf"]

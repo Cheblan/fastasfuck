@@ -115,5 +115,5 @@ def audit_binary(bin_path):
                 print(f"[{cat}] VGPR: {v:>3} | Spill: {s:>2} | Private: {p:>3} B | {name[:75]}")
 
 if __name__ == "__main__":
-    target_bin = sys.argv[1] if len(sys.argv) > 1 else "/home/cheblan/strixite-main/build/strix/strix_server"
+    target_bin = sys.argv[1] if len(sys.argv) > 1 else "/home/cheblan/fastasfuck/build/strix/fastasfuck_server"
     audit_binary(target_bin)

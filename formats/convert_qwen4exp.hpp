@@ -1,6 +1,6 @@
 #pragma once
 
-// Offline converter: Qwen3.8-Flash-Next HF safetensors -> weights.strixw (formats/strixw.hpp; layout A by default).
+// Offline converter: Qwen3.8-Flash-Next HF safetensors -> weights.faf (formats/faf.hpp; layout A by default).
 // Plans every output tensor from the checkpoint headers alone (merge groups from formats/merge_plan, the HC
 // fold, chunk-major W_up, the router in BF16, small tensors widened to F32), then streams the sources
 // (pread in ~256 MB chunks, the next chunk read while this one is quantized on all cores, page cache
@@ -8,7 +8,7 @@
 // transform the first time it appears and reports per-tensor size, bits per weight, sampled quantization
 // error and time, and per-layer progress with throughput and an ETA.
 
-#include "formats/strixw.hpp"
+#include "formats/faf.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -30,7 +30,7 @@ struct VisionDims {
 
 struct ConvertOptions {
     std::string src_dir;      // HF checkpoint directory (*.safetensors + model.safetensors.index.json)
-    std::string out_dir;      // created if missing; must not already hold weights.strixw
+    std::string out_dir;      // created if missing; must not already hold weights.faf
     std::string git;          // converter git hash, recorded in the metadata
     // Per-class formats: "default=q4g64" is layout A; e.g. ",gdn_in=q8g64" puts a class
     // at Q8 (only where a kernel exists).
@@ -46,13 +46,13 @@ struct ConvertOptions {
     std::string mtp_from;
     bool plan_only = false;       // log the plan and stop (reads headers only)
     FILE *console = stderr;       // log sink besides out_dir/convert.log (nullptr: file only)
-    // Vision tower: additionally write out_dir/vision.strixw,
-    // every model.visual.* tensor as an exact BF16 copy, validated against vision_dims. weights.strixw is
+    // Vision tower: additionally write out_dir/vision.faf,
+    // every model.visual.* tensor as an exact BF16 copy, validated against vision_dims. weights.faf is
     // unchanged either way (the text file never carries the tower, so existing downloads stay valid).
     bool vision = false;
     // Tower only: write exactly that file and nothing else - the path to add a tower to an output
     // directory converted before --vision existed (the text plan is not read, its refusal of an existing
-    // weights.strixw does not apply; the tower file's own existence still stops it).
+    // weights.faf does not apply; the tower file's own existence still stops it).
     bool tower_only = false;
     VisionDims vision_dims;
     std::string vision_config_json;  // the raw "vision_config" object text, stored in the new file's index
@@ -62,7 +62,7 @@ enum class ConvertOp { Q4Merge, Q4FoldHC, Q4ChunkMajor, BF16Rows, F32Widen, I64C
 const char *convert_op_name(ConvertOp op);
 
 struct ConvertStep {
-    StrixwTensor out;                  // name, encoding, shape, group size, experts, parts
+    FafTensor out;                  // name, encoding, shape, group size, experts, parts
     ConvertOp op = ConvertOp::F32Widen;
     std::vector<std::string> sources;  // Q4Merge / BF16Rows: the parts; Q4FoldHC: down, inject (or ""), norm
     int64_t unit = -1;                 // decoder layer index, -1 globals, -2 MTP (for progress grouping)
@@ -86,7 +86,7 @@ struct ConvertResult {
 
 ConvertResult convert_qwen4exp(const ConvertOptions &opt);
 
-// The source checkpoint's fingerprint as the converter records it (strixw metadata source_fingerprint): a hash of
+// The source checkpoint's fingerprint as the converter records it (faf metadata source_fingerprint): a hash of
 // the index JSON and every shard's name, size and header. Files converted from the same checkpoint carry the same.
 std::string checkpoint_fingerprint(const std::string &dir);
 

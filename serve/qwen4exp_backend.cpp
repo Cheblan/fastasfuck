@@ -2,7 +2,7 @@
 
 #include "common/check.hpp"
 #include "common/log.hpp"
-#include "formats/strixw.hpp"
+#include "formats/faf.hpp"
 #include "runtime/ngram_table.hpp"
 
 #include <algorithm>
@@ -60,7 +60,7 @@ const Qwen4ExpSnapshot &Qwen4ExpBackend::snap(int seq, int slot) const {
 }
 
 // The n-gram table's counters exist only for rows read from a table file: a model with no rows at all (no PLE layer,
-// so ngram_rows() would throw) and a checkpoint-shard source have none (strixite PR #35).
+// so ngram_rows() would throw) and a checkpoint-shard source have none (upstream PR #35).
 const NgramTableRows *Qwen4ExpBackend::ngram_table() const {
     if (!model_.has_ngram_rows()) return nullptr;
     return dynamic_cast<const NgramTableRows *>(&model_.ngram_rows());
@@ -188,7 +188,7 @@ void Qwen4ExpBackend::resume_small(int seq, const HostBuffer &small, int64_t n) 
 }
 
 std::string Qwen4ExpBackend::state_fingerprint() const {
-    const StrixwFile &f = model_.weights().file();
+    const FafFile &f = model_.weights().file();
     // The layout string is long; its hash keeps the fingerprint short (the header holds < 192 chars).
     const std::string &layout = f.meta("layout");
     char buf[160];
@@ -212,7 +212,7 @@ std::string Qwen4ExpBackend::state_fingerprint() const {
 }
 
 std::string Qwen4ExpBackend::describe() const {
-    const StrixwFile &f = model_.weights().file();
+    const FafFile &f = model_.weights().file();
     return "qwen4exp, " + std::to_string(model_.dims().layers) + " layers, layout " + f.meta("layout") + ", " +
            kernels::act_name(model_.act()) + ", capacity " + std::to_string(capacity()) + ", chunk " +
            std::to_string(max_chunk()) + ", precision " + session_->precision().describe() + ", kv " +
@@ -277,7 +277,7 @@ LogitRows Qwen4ExpBackend::forward_image_prefill(int seq, const std::vector<int3
                                                  int64_t n_valid, const LogitMasks *masks) {
     check_seq(seq, "forward_image_prefill");
     STRIX_CHECK(model_.has_vision(), "Qwen4ExpBackend::forward_image_prefill: the model was loaded without "
-                "a vision.strixw - image prompts are refused (config vision)");
+                "a vision.faf - image prompts are refused (config vision)");
     if (masks != nullptr)
         masks->check(n_logits, logits_row(), "Qwen4ExpBackend::forward_image_prefill");
     STRIX_CHECK(!image.prefill.pixel_values.empty(), "Qwen4ExpBackend::forward_image_prefill: the image block at row ",

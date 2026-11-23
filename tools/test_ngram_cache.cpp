@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <random>
 #include <vector>
@@ -12,7 +13,12 @@
 using namespace strix;
 
 int main(int argc, char **argv) {
-    const std::string path = argc > 1 ? argv[1] : "/models/Thinking-Cap-Qwen-3.8-FN-strixw/ngram.table";
+    namespace fs = std::filesystem;
+    std::string default_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/ngram.table";
+    if (!fs::exists(default_path) && fs::exists("/models/Thinking-Cap-Qwen-3.8-FN-strixw/ngram.table")) {
+        default_path = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/ngram.table";
+    }
+    const std::string path = argc > 1 ? argv[1] : default_path;
     std::cout << "Testing NgramTableRows compact Q8 + CLOCK on: " << path << std::endl;
 
     // Ground truth reference: cache_rows = 0 (always reads directly from NVMe)

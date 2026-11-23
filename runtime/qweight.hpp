@@ -2,7 +2,7 @@
 
 // A dense projection's weight in whichever format the layout gave it (the converter's per-class
 // --layout): Q4 (formats/q4), Q5 / Q6 (formats/q5, q6) or Q8 (formats/q8), row-major, resident on the device. linear_qw dispatches to
-// the matching kernel - the per-tensor format is read from the strixw file at load, never guessed.
+// the matching kernel - the per-tensor format is read from the .faf file at load, never guessed.
 
 #include "common/check.hpp"
 #include "kernels/linear_q4.hpp"

@@ -72,7 +72,7 @@ void check_tools(const json::Value &tools) {
 // Several leading system messages (opencode sends two) become one, their texts joined by a blank line - the
 // template accepts a single system message, first. Content may be a string or text parts. OpenAI's newer clients
 // send the instructions as role "developer" (its name for system with reasoning models): a leading developer
-// message is a system message here, so even a lone one is rewritten (strixite PR #28).
+// message is a system message here, so even a lone one is rewritten (upstream PR #28).
 json::Value merge_leading_system(const json::Value &messages) {
     const auto &ms = messages.as_array("messages");
     size_t n = 0;

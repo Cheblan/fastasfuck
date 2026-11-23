@@ -226,7 +226,7 @@ def run_mixed_profile(base_url: str, n_decode: int, n_prefill: int, prefill_toke
 
 def run_mixed_suite(base_url: str, n_trials: int = 3, output_json: str = None) -> Dict[str, Any]:
     print("=" * 125)
-    print("STRIXITE MIXED CONCURRENCY ISOLATION SUITE (AIRTIGHT MUTUAL CONTENTION)")
+    print("FASTASFUCK MIXED CONCURRENCY ISOLATION SUITE (AIRTIGHT MUTUAL CONTENTION)")
     print(f"Target Server : {base_url}")
     print(f"Trials        : n={n_trials} trials strictly inside the mutual contention window (decoders looped)")
     print("=" * 125)
@@ -340,8 +340,8 @@ def run_mixed_suite(base_url: str, n_trials: int = 3, output_json: str = None) -
     return report
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Strixite Mixed Concurrency Isolation Suite")
-    parser.add_argument("--url", default="http://127.0.0.1:5300", help="Base URL of strix_server")
+    parser = argparse.ArgumentParser(description="fastasfuck Mixed Concurrency Isolation Suite")
+    parser.add_argument("--url", default="http://127.0.0.1:5300", help="Base URL of fastasfuck_server")
     parser.add_argument("--trials", type=int, default=3, help="Number of measurement trials per profile (default: 3)")
     parser.add_argument("--output", default="benchmark_mixed_concurrency.json", help="Path to save JSON report")
     args = parser.parse_args()

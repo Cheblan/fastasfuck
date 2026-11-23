@@ -81,7 +81,7 @@ public:
                                   const LogitMasks *masks = nullptr) override {
         return rows_of(ids, n_logits, cands, n_valid, masks, true);
     }
-    // Vision (Phase D): the model carries the tower when it was built with a vision.strixw; the image
+    // Vision (Phase D): the model carries the tower when it was built with a vision.faf; the image
     // forward mirrors rows_of, with the block's triples set first (the session checks the continuation).
     bool has_vision() const override { return model_.has_vision(); }
     int64_t max_positions() const override { return model_.dims().max_positions(); }

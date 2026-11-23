@@ -1344,7 +1344,7 @@ void Engine::run(Job &job, Slot &sl) {
         };
         // A token sampled at a rejected draft's position - already counted, fed to the parser and the response format,
         // but not yet forwarded: the next step starts from it (drafts from it, then verifies it as row 0) instead of a
-        // forward of its own (strixite PR #1).
+        // forward of its own (upstream PR #1).
         int32_t carry = -1;
         float ema_T = 48.0f;
         float ema_E = 3.2f;
@@ -1631,7 +1631,7 @@ void Engine::run(Job &job, Slot &sl) {
                     // Draft j rejected; v is this position's sampled token. Keep id and the j accepted drafts from the
                     // verify (the backend doesn't run them again - keep_verify_prefix). The session is then "after
                     // ids[j]" - what a step's drafting starts from - so v carries into the next step instead of a
-                    // forward of its own (strixite PR #1): one forward less per rollback.
+                    // forward of its own (upstream PR #1): one forward less per rollback.
                     ++res.mtp_rollbacks, ++res.completion_tokens, ++res.mtp_reject_at[std::min<int64_t>(j, kMtpMaxDraft - 1)];
                     {  // v's PLE rows load while the prefix is kept (its forward - the next verify's row 0 - comes soon)
                         std::vector<int32_t> next(ids.begin(), ids.begin() + j + 1);
@@ -1747,7 +1747,7 @@ void Engine::run(Job &job, Slot &sl) {
             stats_.ram_saves += saved, stats_.export_seconds += now_s() - t0;
         }
     } catch (const GpuFatalError &e) {
-        // The GPU context is gone (strixite issue #6: an aperture violation, then hipErrorIllegalAddress on every
+        // The GPU context is gone (upstream issue #6: an aperture violation, then hipErrorIllegalAddress on every
         // request until a restart): no reset - it would fail too. The worker fails the queue and calls on_fatal.
         slog_row(LogLevel::Error, "error", "FATAL: %s", e.what());
         slog_row(LogLevel::Error, "", "FATAL: no request can run on this GPU context: failing the queued ones, refusing "

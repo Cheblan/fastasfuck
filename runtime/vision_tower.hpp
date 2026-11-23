@@ -1,7 +1,7 @@
 #pragma once
 
 // The vision tower inside the engine: the 0.45B ViT + merger resident on the
-// device from vision.strixw, one forward per image. The checkpoint's `model.visual.*` tensors arrive
+// device from vision.faf, one forward per image. The checkpoint's `model.visual.*` tensors arrive
 // bit-exact as BF16 rows (the converter's --vision pass, validated tensor by tensor against the
 // checkpoint's config.json "vision_config"); everything the tower reads is shape-checked here at load,
 // so a file that isn't the tower this code runs fails at construction, named.
@@ -15,10 +15,10 @@
 // One image per forward (t = 1): the temporal grid axis must be 1 - video is not built.
 
 #include "common/hip_runtime.hpp"
-#include "formats/strixw.hpp"
+#include "formats/faf.hpp"
 #include "kernels/norm.hpp"  // Act
 #include "runtime/device_buffer.hpp"
-#include "runtime/strixw_loader.hpp"
+#include "runtime/faf_loader.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -62,12 +62,12 @@ struct TowerScratchBytes {
 
 class VisionTower {
 public:
-    // path: a vision.strixw from the same checkpoint as text_weights (the side-file rule the n-gram table
+    // path: a vision.faf from the same checkpoint as text_weights (the side-file rule the n-gram table
     // follows: kind must be "vision" and source_fingerprint must equal the text file's - a tower from
     // another checkpoint is refused naming both). The tower loads to the device whatever the text model's
     // placement is: HostExperts is a contract about expert stacks, which the tower file has none of, and
     // 856 MiB of BF16 is a device region on every machine.
-    VisionTower(const std::string &path, const StrixwFile &text_weights, kernels::Act act);
+    VisionTower(const std::string &path, const FafFile &text_weights, kernels::Act act);
 
     const VisionTowerDims &dims() const { return dims_; }
     kernels::Act act() const { return act_; }
@@ -98,7 +98,7 @@ private:
     std::vector<float> read_back_wide(const uint16_t *dev_bits, int64_t n, const char *fn);  // D2H + widen
 
     std::string path_;
-    std::unique_ptr<StrixwDevice> w_;
+    std::unique_ptr<FafDevice> w_;
     kernels::Act act_;
     VisionTowerDims dims_;
     std::vector<int64_t> patch_shape_;  // the file's (rank-5) patch_embed.proj.weight shape

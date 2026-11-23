@@ -5,8 +5,8 @@
 // has it), each sublayer fed by a hyper-connection mix and written back by an injection, MoE MLP (top-10 of
 // 512 + the gated shared expert), the final mix, the untied LM head.
 //
-// Weights come from the converter's weights.strixw (formats/strixw), loaded once into device memory
-// (runtime/strixw_loader), every tensor already in its kernel's layout. The dense projections (GDN in/out,
+// Weights come from the converter's weights.faf (formats/faf), loaded once into device memory
+// (runtime/faf_loader), every tensor already in its kernel's layout. The dense projections (GDN in/out,
 // attention q|k|v|idx and o, PLE key|value, LM head, a separate shared expert) run as Q4 or Q8, whichever the
 // layout gave each tensor, and so do the HC mixes; the routed experts are Q4 (their kernels are Q4-only, so the
 // converter refuses anything else). The shared expert is expert #512 of the stack when it has the routed experts' format,
@@ -36,7 +36,7 @@
 #include "runtime/ple_hash.hpp"
 #include "runtime/q4_device.hpp"
 #include "runtime/qweight.hpp"
-#include "runtime/strixw_loader.hpp"
+#include "runtime/faf_loader.hpp"
 #include "runtime/vision_tower.hpp"
 
 #include <array>
@@ -86,7 +86,7 @@ constexpr int32_t kVisionImageTokenId = 248056;
 
 class Qwen4ExpModel {
 public:
-    // weights: a weights.strixw with every decoder layer and the globals. ngram: where the PLE n-gram rows come from
+    // weights: a weights.faf with every decoder layer and the globals. ngram: where the PLE n-gram rows come from
     // - an ngram.table file (tools/convert_ngram_table; its checkpoint fingerprint must equal the weights') or the
     // HF checkpoint directory (interim reader). allow_truncated: also accept a conversion of the first k layers +
     // globals (--layers 0,..,k-1) - a truncated model for wiring tests only, its logits aren't the model's.
@@ -94,8 +94,8 @@ public:
     // checkpoint directory is refused). yarn_factor: 1 = RoPE as trained (262,144 positions); > 1 = YaRN over
     // 262,144 * yarn_factor positions (kernels/rope.hpp rope_yarn) - every RoPE user (attention q/k, the QSA indexer,
     // MTP) then rotates with the YaRN table, so caches made under another factor don't match. placement: where the
-    // weights live (runtime/strixw_loader.hpp; HostExperts is for test / bench tools, never the server).
-    // vision: a vision.strixw (the tower file the converter's --vision pass writes) to load the image tower
+    // weights live (runtime/faf_loader.hpp; HostExperts is for test / bench tools, never the server).
+    // vision: a vision.faf (the tower file the converter's --vision pass writes) to load the image tower
     // behind, empty (the default, the served config) = no tower - nothing loaded, Qwen4ExpSession::forward's
     // image overload refuses. Its source_fingerprint must match the text weights' (the same side-file rule the
     // n-gram table follows), so both come from the same checkpoint.
@@ -105,7 +105,7 @@ public:
                   const std::string &vision = "");
     const Qwen4ExpDims &dims() const { return dims_; }
     kernels::Act act() const { return act_; }
-    const StrixwDevice &weights() const { return *w_; }
+    const FafDevice &weights() const { return *w_; }
     bool truncated() const { return truncated_; }
     bool shared_separate() const { return shared_separate_; }
     // The image tower: loaded only when the constructor got a vision file. vision() throws without one
@@ -157,7 +157,7 @@ public:
     bool has_mtp() const { return has_mtp_; }
     const MtpHead &mtp() const { return mtp_; }
 
-    // The MTP draft's own Q4 copy of the LM head's first `rows` rows (strixite PR #2 by @TheBeaninator, rewritten;
+    // The MTP draft's own Q4 copy of the LM head's first `rows` rows (upstream PR #2 by @TheBeaninator, rewritten;
     // formats/q4_from_q8.hpp). Every draft call scores the first mtp_vocab rows of the LM head; the served head is
     // Q8, so at 65,536 rows a draft reads 178 MB of it. The copy halves that (94 MB at G 64).
     //   - Only drafts use it: lm_head() - the trunk's logits, the verify, sampling - never changes, and the verify
@@ -186,7 +186,7 @@ public:
 private:
     Qwen4ExpDims dims_;
     kernels::Act act_;
-    std::unique_ptr<StrixwDevice> w_;
+    std::unique_ptr<FafDevice> w_;
     std::unique_ptr<VisionTower> vision_;  // the constructor's vision file, empty = no tower
     std::unique_ptr<NgramRowSource> ngram_;
     std::vector<Layer> layers_;
@@ -418,16 +418,16 @@ struct ParkedKv {
     bool live() const { return reservation != nullptr; }
 };
 
-// The model's dimensions from a strixw file's header + index alone (no weights loaded): the layer count and the
+// The model's dimensions from a faf file's header + index alone (no weights loaded): the layer count and the
 // attention / GDN kind pattern read off the tensors, the rest the qwen4exp family's fixed dims. The model's
 // loader uses it; so does the hand-off check, which needs the real layout without uploading 68 GB.
-Qwen4ExpDims qwen4exp_dims_from_file(const StrixwFile &f);
+Qwen4ExpDims qwen4exp_dims_from_file(const FafFile &f);
 
 // The routed experts per layer, from layer 0's gate|up stack ([slots x 2*inter, d]; slots = the routed experts, plus
 // the shared one as the last slot unless shared_separate). Qwen4ExpDims::experts (512) is only the default: a
-// checkpoint converted from an expert subset carries fewer (strixite PR #35). The count the converter records
-// (StrixwTensor::experts; 0 in older files) must agree, and the count must cover top_k. Throws naming `where`.
-int64_t qwen4exp_routed_experts(const StrixwTensor *gate_up, const Qwen4ExpDims &D, bool shared_separate,
+// checkpoint converted from an expert subset carries fewer (upstream PR #35). The count the converter records
+// (FafTensor::experts; 0 in older files) must agree, and the count must cover top_k. Throws naming `where`.
+int64_t qwen4exp_routed_experts(const FafTensor *gate_up, const Qwen4ExpDims &D, bool shared_separate,
                                 const std::string &where);
 
 // ---------------------------------------------------------------------------

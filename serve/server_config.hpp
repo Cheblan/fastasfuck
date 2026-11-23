@@ -87,5 +87,8 @@ constexpr int64_t kServedNgramCacheRows = 8388608;
 // paths live. Every default is the served value (the defaults are what a dedicated headless Strix Halo serving a
 // coding agent uses), and deploy/strix-server.conf lists the same values.
 std::vector<ConfigOption> strix_server_options(const std::string &models_dir);
+inline std::vector<ConfigOption> fastasfuck_server_options(const std::string &models_dir) {
+    return strix_server_options(models_dir);
+}
 
 }  // namespace strix

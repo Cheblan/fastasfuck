@@ -3,7 +3,7 @@
 tools/bench/run_mixed_triad.py: Automated runner for the Mixed Concurrency Triad:
 chunk = 4096, chunk-shared in {1024, 512, 256}.
 For each candidate:
-1. Cleanly restarts strix_server via tmux.
+1. Cleanly restarts fastasfuck_server via tmux.
 2. Waits for /health to become online.
 3. Executes bench_mixed_concurrency.py (with untimed ping + 16k warmup per profile).
 4. Saves isolated JSON report.
@@ -19,8 +19,8 @@ import urllib.request
 from typing import Dict, Any
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SERVER_BIN = os.path.join(BASE_DIR, "build/strix/strix_server")
-CONFIG_FILE = "/home/cheblan/strix-server-hybrid.conf"
+SERVER_BIN = os.path.join(BASE_DIR, "build/strix/fastasfuck_server")
+CONFIG_FILE = "/home/cheblan/fastasfuck-server.conf"
 BASE_URL = "http://127.0.0.1:5300"
 DOCS_DIR = os.path.join(BASE_DIR, "docs", "benchmarks", "1.0.0")
 
@@ -41,24 +41,24 @@ def wait_for_server(timeout_sec: float = 60.0) -> bool:
     return False
 
 def restart_server(chunk: int, chunk_shared: int):
-    print(f"\n[ORCHESTRATOR] Stopping existing strix_server instance...")
+    print(f"\n[ORCHESTRATOR] Stopping existing fastasfuck_server instance...")
     subprocess.run(["tmux", "send-keys", "-t", "strix", "C-c"], check=False)
     time.sleep(2.0)
     
     # Ensure killed
-    res = subprocess.run(["pgrep", "-f", "strix_server"], capture_output=True, text=True)
+    res = subprocess.run(["pgrep", "-f", "fastasfuck_server"], capture_output=True, text=True)
     if res.stdout.strip():
-        subprocess.run(["pkill", "-9", "-f", "strix_server"], check=False)
+        subprocess.run(["pkill", "-9", "-f", "fastasfuck_server"], check=False)
         time.sleep(2.0)
 
-    print(f"[ORCHESTRATOR] Launching strix_server with --chunk {chunk} --chunk-shared {chunk_shared} in tmux 'strix'...")
+    print(f"[ORCHESTRATOR] Launching fastasfuck_server with --chunk {chunk} --chunk-shared {chunk_shared} in tmux 'strix'...")
     cmd = f"{SERVER_BIN} --config {CONFIG_FILE} --chunk {chunk} --chunk-shared {chunk_shared}"
     subprocess.run(["tmux", "send-keys", "-t", "strix", cmd, "C-m"], check=True)
 
     print("[ORCHESTRATOR] Waiting for server /health...")
     if not wait_for_server(60.0):
-        raise RuntimeError("strix_server failed to become healthy within 60 seconds!")
-    print("[ORCHESTRATOR] strix_server is online and healthy.\n")
+        raise RuntimeError("fastasfuck_server failed to become healthy within 60 seconds!")
+    print("[ORCHESTRATOR] fastasfuck_server is online and healthy.\n")
 
 def run_suite(output_json: str):
     script_path = os.path.join(BASE_DIR, "tools/bench/bench_mixed_concurrency.py")
@@ -88,7 +88,7 @@ def print_triad_summary():
         return
 
     print("\n" + "=" * 135)
-    print("STRIXITE MIXED CONCURRENCY TRIAD COMPARISON (chunk = 4096, chunk-shared in {1024, 512, 256})")
+    print("FASTASFUCK MIXED CONCURRENCY TRIAD COMPARISON (chunk = 4096, chunk-shared in {1024, 512, 256})")
     print("=" * 135)
     print(f"{'chunk-shared':<12} | {'Profile':<8} | {'Decode / Slot (tok/s)':<22} | {'Prefill Agg (tok/s)':<24} | {'Step p50':<9} | {'Step p95':<9} | {'Step p99':<9} | {'Max ITL':<9}")
     print("-" * 135)

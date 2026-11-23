@@ -119,7 +119,7 @@ MemoryPlan plan_memory(const MemoryPlanInput &in) {
                     gib(p.need - A) + ". To fit: " + fixes +
                     ". Or set low-memory = adapt to start anyway with the RAM caches turned down (each step is logged "
                     "with its cost). low-memory = fail is the default because a server short of memory fails later and "
-                    "worse (strixite issue #6: driver faults, then a crash)";
+                    "worse (upstream issue #6: driver faults, then a crash)";
         return p;
     }
 

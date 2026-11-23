@@ -9,10 +9,10 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 | **Processor** | AMD Ryzen AI Max+ 395 (Strix Halo) |
 | **GPU Architecture** | AMD RDNA 3.5 (`gfx1151`), 40 Compute Units (20 Dual CUs / WGPs), Wave32 |
 | **Unified DRAM** | 128 GB Unified LPDDR5X-8533 on a 256-bit memory bus (~273.0 GB/s theoretical peak) |
-| **Operating System** | Fedora 43 (Linux Kernel 6.13.0, x86_64) |
+| **Operating System** | Arch Linux (Linux Kernel 7.3-zen, x86_64) |
 | **Kernel Command Line** | `ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=always` |
 | **Target Model** | Qwen 3.8-Flash-Next (128.4B MoE, 512 experts, top-10 active per token, 48 layers) |
-| **Production Quantization** | **Hybrid Q6 / Q4 / Q8** (`weights-q6-hybrid.strixw`, ~65.5 GiB footprint) |
+| **Production Quantization** | **Hybrid Q6 / Q4 / Q8** (`weights-q6-hybrid.faf`, ~65.5 GiB footprint) |
 | **KV Cache Precision** | 8-bit Quantized (`kv-cache = q8`) |
 | **Speculative Decoding** | Multi-Token Prediction (MTP) with 7 draft steps and 8M-row PLE n-gram table |
 | **Serving Configuration** | `chunk = 4096`, `chunk-shared = 1024` (DRR GpuArbiter production default) |
@@ -21,9 +21,9 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 
 ## 2. Table 1: Single-Stream (Solo) Performance & Determinism
 
-- **Execution Profile:** 1 Active Slot, Greedy Decoding ($T=0.0$, `top_p = 1.0`, `top_k = 1`, `seed = 2281488`).
+- **Execution Profile:** 1 Active Slot, Greedy Decoding (T = 0.0, `top_p = 1.0`, `top_k = 1`, `seed = 2281488`).
 - **Sterile Condition:** Prompt-cache snapshot substitution disabled (`prompt-cache = off`). Clean cold prefill on every run.
-- **Protocol:** $n=5$ consecutive measurement trials per prompt (+ 1 untimed hardware warmup ping).
+- **Protocol:** n = 5 consecutive measurement trials per prompt (+ 1 untimed hardware warmup ping).
 - **Determinism Standard:** Dynamic SHA-256 hash match across all 5 trials (no hardcoded hashes).
 
 | Task | Domain / Subject | Completion Tokens | TTFT (ms) | Decode Throughput (tok/s) | Bit-Identity Status (SHA-256) |
@@ -40,26 +40,26 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 
 ## 3. Table 2: Prefill Context Scaling (1 Slot)
 
-- **Execution Profile:** 1 Active Slot, $T=0.0$.
+- **Execution Profile:** 1 Active Slot, T = 0.0.
 - **Corpus:** Real non-repeating C++ source repository files (`serve/*.cpp`, `serve/*.hpp`, 945,000 characters).
 - **Cold vs Warm PLE:** Cold run reflects uncached NVMe lookahead reads; Warm run reflects hot n-gram row buffers in RAM.
-- **Protocol:** $n=5$ trials for $4\text{k}$–$32\text{k}$, $n=3$ trials for $64\text{k}$–$128\text{k}$ (+ 1 untimed warmup ping).
+- **Protocol:** n = 5 trials for 4k–32k, n = 3 trials for 64k–128k (+ 1 untimed warmup ping).
 
 | Context Target | Actual Evaluated Tokens | Cold Prefill Speed (NVMe) | Warm Prefill Speed (RAM/PLE) | Time to First Token (TTFT) |
 |---|---|---|---|---|
-| **4k Context** | 4,395 tokens | 1,388.9 tok/s | **1,437.6 ± 30.4 tok/s** ($n=5$) | 3.06 s |
-| **16k Context** | 15,683 tokens | 1,433.8 tok/s | **1,454.2 ± 4.5 tok/s** ($n=5$) | 10.78 s |
-| **32k Context** | 30,899 tokens | 1,440.9 tok/s | **1,457.9 ± 6.2 tok/s** ($n=5$) | 21.20 s |
-| **64k Context** | 60,183 tokens | 1,427.9 tok/s | **1,424.9 ± 5.1 tok/s** ($n=3$) | 42.22 s |
-| **128k Context** | 126,482 tokens | 1,376.9 tok/s | **1,377.9 ± 1.4 tok/s** ($n=3$) | 91.79 s |
+| **4k Context** | 4,395 tokens | 1,388.9 tok/s | **1,437.6 ± 30.4 tok/s** (n = 5) | 3.06 s |
+| **16k Context** | 15,683 tokens | 1,433.8 tok/s | **1,454.2 ± 4.5 tok/s** (n = 5) | 10.78 s |
+| **32k Context** | 30,899 tokens | 1,440.9 tok/s | **1,457.9 ± 6.2 tok/s** (n = 5) | 21.20 s |
+| **64k Context** | 60,183 tokens | 1,427.9 tok/s | **1,424.9 ± 5.1 tok/s** (n = 3) | 42.22 s |
+| **128k Context** | 126,482 tokens | 1,376.9 tok/s | **1,377.9 ± 1.4 tok/s** (n = 3) | 91.79 s |
 
-*Note on I/O Lookahead:* On prompts $\ge 16\text{k}$, Cold NVMe and Warm RAM prefill throughput are virtually identical ($< 1\%$ delta) because the engine's `set_lookahead` thread asynchronously reads chunk $k+1$ from NVMe into pinned host memory while chunk $k$ executes on the GPU compute units.
+*Note on I/O Lookahead:* On prompts ≥ 16k, Cold NVMe and Warm RAM prefill throughput are virtually identical (< 1% delta) because the engine's `set_lookahead` thread asynchronously reads chunk $k+1$ from NVMe into pinned host memory while chunk $k$ executes on the GPU compute units.
 
 ---
 
 ## 4. Table 3: Multi-Slot Concurrency Scaling (1, 2, 4 Slots)
 
-- **Execution Profile:** Concurrent multi-agent execution across slots ($T=0.6$, $n=3$ full measurement trials after untimed warmup).
+- **Execution Profile:** Concurrent multi-agent execution across slots (T = 0.6, n = 3 full measurement trials after untimed warmup).
 - **Prompts:** Parallel dispatch of diverse standardized tasks (P1–P6).
 
 | Active Slots | Aggregate Throughput (tok/s) | Per-Slot Throughput (tok/s) | Step Latency p50 | Step Latency p95 | Effective ITL |
@@ -69,7 +69,7 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 | **4 Slots** | **104.38 ± 10.56** (peak **115.5**) | **31.07 ± 2.98** | 109.8 ms | 129.4 ms | **32.2 ms** |
 
 *Note on Peak Throughput & Concurrency:*
-- **Instantaneous vs Aggregate Throughput:** 4 slots executing concurrently at $31.07\text{ tok/s}$ per slot correspond to $4 \times 31.07 = 124.3\text{ tok/s}$ instantaneous throughput. The grand aggregate mean ($104.38\text{ tok/s}$) accounts for natural completion staggering across diverse prompt lengths.
+- **Instantaneous vs Aggregate Throughput:** 4 slots executing concurrently at 31.07 tok/s per slot correspond to 4 × 31.07 = 124.3 tok/s instantaneous throughput. The grand aggregate mean (104.38 tok/s) accounts for natural completion staggering across diverse prompt lengths.
 - **Effective ITL:** With Multi-Token Prediction (MTP) draft heads accepting 2–4 tokens per verify step on average, the effective inter-token latency experienced by clients ranges between **13.0 ms and 32.2 ms**.
 
 ---
@@ -77,7 +77,7 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 ## 5. Chunk Sizing, Saturation Knee, and Pareto Frontier
 
 ### Phase A: Solo Prefill Compute Saturation Knee
-Evaluating single-slot prefill throughput on 16k and 64k tokens across `chunk ∈ {1024, 2048, 4096, 8192, 16384}` under warm RAM/PLE cache ($n=3$):
+Evaluating single-slot prefill throughput on 16k and 64k tokens across `chunk ∈ {1024, 2048, 4096, 8192, 16384}` under warm RAM/PLE cache (n = 3):
 
 | `chunk` Size | 16k Prefill Throughput | 64k Prefill Throughput | Incremental Gain | Hardware Saturation State |
 |:---:|:---:|:---:|:---:|---|
@@ -88,7 +88,7 @@ Evaluating single-slot prefill throughput on 16k and 64k tokens across `chunk �
 | **16384** | 1,948.0 ± 2.7 tok/s | 1,926.4 ± 2.0 tok/s | +2.1% | Asymptotic limit (large chunk stalls decoders) |
 
 ### Phase B: Multi-Agent Closed-Loop Replay Pareto Frontier
-Sweeping candidate pairs under a 4-slot bimodal agent workload (3 slots decoding, 1 slot prefilling heavy context, $n=3$):
+Sweeping candidate pairs under a 4-slot bimodal agent workload (3 slots decoding, 1 slot prefilling heavy context, n = 3):
 
 | Candidate `(chunk, chunk-shared)` | Total Makespan (s) | Turn E2E Latency p95 (s) | Short-Turn TTFT p95 (ms) | Steady Step ITL p50 (ms) | Steady Step ITL p99 (ms) | Solo Transition Ceiling (ms)* |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -102,7 +102,7 @@ Sweeping candidate pairs under a 4-slot bimodal agent workload (3 slots decoding
 | (1024, 256) | 20.59 ± 0.74 | 19.89 | 309.9 | 256.2 | 750.6 | ~750 |
 
 *\*Note on Solo Transition Ceiling vs Steady-State Streaming:*
-When an idle GPU receives an isolated prefill request, the arbiter dispatches full solo `chunk` allocations (e.g. 4096 tokens, taking $4096 / 1820 \approx 2.25\text{ s}$) before concurrent generation requests arrive. Any incoming request mid-quantum experiences up to this transition ceiling before the arbiter detects concurrency and engages `chunk-shared`. Once `chunk-shared` is engaged in steady-state operation:
+When an idle GPU receives an isolated prefill request, the arbiter dispatches full solo `chunk` allocations (e.g. 4096 tokens, taking 4096 / 1820 ≈ 2.25 s) before concurrent generation requests arrive. Any incoming request mid-quantum experiences up to this transition ceiling before the arbiter detects concurrency and engages `chunk-shared`. Once `chunk-shared` is engaged in steady-state operation:
 - `chunk-shared = 512` delivers **33% lower steady-state step latency** (~500 ms p95 vs ~770 ms on 1024).
 - `chunk-shared = 1024` provides the optimal balance of smooth ~750 ms streaming with **+25–35% higher concurrent prefill throughput** (avoiding MoE expert starvation).
 
@@ -110,9 +110,9 @@ When an idle GPU receives an isolated prefill request, the arbiter dispatches fu
 The maximum possible single-token latency pause during prefill transitions is strictly governed by the physical quantum duration:
 $$\text{Solo Quantum Latency} = \frac{\text{chunk}}{\text{Solo Prefill Throughput}} + \text{Step Overhead}$$
 
-- For `chunk = 1024`: $1024 / 1555 \approx 0.66\text{ s} \implies \text{Max ITL } \approx 750\text{ ms}$.
-- For `chunk = 2048`: $2048 / 1668 \approx 1.23\text{ s} \implies \text{Max ITL } \approx 1,320\text{ ms}$.
-- For `chunk = 4096`: $4096 / 1820 \approx 2.25\text{ s} \implies \text{Max ITL } \approx 2,310\text{ ms}$.
+- For `chunk = 1024`: 1024 / 1555 ≈ 0.66 s ⟹ Max ITL ≈ 750 ms.
+- For `chunk = 2048`: 2048 / 1668 ≈ 1.23 s ⟹ Max ITL ≈ 1,320 ms.
+- For `chunk = 4096`: 4096 / 1820 ≈ 2.25 s ⟹ Max ITL ≈ 2,310 ms.
 
 Whenever a prefill request arrives while no other slot is actively generating, the server executes solo quants of `chunk = 4096` to maximize prefill bandwidth. If a concurrent generation request arrives mid-quantum, it experiences up to ~2.25s of initial prefill time before the GpuArbiter detects active multi-slot concurrency and switches to `chunk-shared = 1024`, after which all decode steps are strictly bounded under ~770 ms.
 
@@ -129,7 +129,7 @@ Evaluated strictly inside the mutual contention window (decoders continuously lo
 | **2D + 2P** (2 Dec, 2 Pref 16k) | **18.60 ± 1.00** | **991.7 ± 24.6** | 89.5 ms | 746.4 ms | 760.8 ms | **836.1 ms** | 38.3 s | **94.5%** |
 | **1D + 3P** (1 Dec, 3 Pref 16k) | **25.52 ± 3.04** | **1151.3 ± 94.2** | 65.3 ms | 718.8 ms | 736.3 ms | **2307.3 ms\*** | 49.7 s | **96.4%** |
 
-*\*Note on 1D + 3P Max ITL:* During the ~50-second prefill window, the single decoder completes its 512-token query in ~20 seconds and opens a subsequent query. In the brief socket transition between requests, an isolated prefill slot executes a single solo 4096-token quantum ($4096 / 1820 \approx 2.25\text{ s}$), directly confirming the solo quantum equation.
+*\*Note on 1D + 3P Max ITL:* During the ~50-second prefill window, the single decoder completes its 512-token query in ~20 seconds and opens a subsequent query. In the brief socket transition between requests, an isolated prefill slot executes a single solo 4096-token quantum (4096 / 1820 ≈ 2.25 s), directly confirming the solo quantum equation.
 
 ### The Triad Comparison: `chunk-shared ∈ {1024, 512, 256}`
 Comparative benchmark of quantum slicing configurations on AMD Strix Halo silicon:
@@ -148,9 +148,9 @@ Comparative benchmark of quantum slicing configurations on AMD Strix Halo silico
 
 ### Why `chunk-shared = 1024` Wins on MoE Silicon
 1. **MoE Routing Mathematics:** Qwen 3.8-Flash-Next employs 512 fine-grained experts with top-k = 10.
-   - At `chunk-shared = 256`: total token-expert dispatches $= 256 \times 10 = 2,560$. Across 512 experts, an average of only **$\approx 5$ tokens reach each expert** ($M=5$). GEMM matrix acceleration completely degenerates into a memory-bound bandwidth stall, cutting prefill throughput by **58.5%** and bloating turn makespan from 20s to 56s.
-   - At `chunk-shared = 512`: $\approx 10$ tokens per expert. Prefill drops by 26–33% relative to 1024.
-   - At `chunk-shared = 1024`: $\approx 20$ tokens per expert ($M=20$). Compute units are saturated, sustaining **913–1,151 tok/s** concurrent prefill.
+   - At `chunk-shared = 256`: total token-expert dispatches = 256 × 10 = 2,560. Across 512 experts, an average of only **≈ 5 tokens reach each expert** ($M=5$). GEMM matrix acceleration completely degenerates into a memory-bound bandwidth stall, cutting prefill throughput by **58.5%** and bloating turn makespan from 20s to 56s.
+   - At `chunk-shared = 512`: ≈ 10 tokens per expert. Prefill drops by 26–33% relative to 1024.
+   - At `chunk-shared = 1024`: ≈ 20 tokens per expert ($M=20$). Compute units are saturated, sustaining **913–1,151 tok/s** concurrent prefill.
 2. **Deficit Round Robin Fairness:** As demonstrated by the 3D+1P and 2D+2P profiles, the GpuArbiter guarantees that generation slots receive the GPU compute engine every ~740–770 ms, ensuring silky smooth IDE streaming without starving multi-turn coding agents.
 3. **Alternative Profile:** For users prioritizing softer decode step latencies (~500 ms) in interactive single-agent environments, `chunk-shared = 512` is available as a configurable tuning option at the cost of ~25% prefill bandwidth.
 
@@ -162,9 +162,9 @@ On AMD Strix Halo, CPU and GPU share 128 GB Unified LPDDR5X DRAM on a 256-bit bu
 
 | Memory Component | Allocation | Share of RAM | Engineering Function |
 |---|---|---|---|
-| **Model Weights (`weights-q6-hybrid.strixw`)** | 65.5 GiB | 51.2% | MoE weights resident in GPU-accessible DRAM ([layout guide](weights.md)) |
-| **KV Cache (4 slots × 262,144 tokens)** | 20.4 GiB | 15.9% | Chunked Q8 PagedAttention KV buffers ($1.05\text{M}$ context total) |
-| **Prompt Cache RAM Tier (Hot Snapshots)** | 22.0 GiB | 17.2% | In-memory KV snapshot tier for instant multi-turn agent switching ([config](deploy/strix-server.conf)) |
+| **Model Weights (`weights-q6-hybrid.faf`)** | 65.5 GiB | 51.2% | MoE weights resident in GPU-accessible DRAM ([layout guide](WEIGHTS.md)) |
+| **KV Cache (4 slots × 262,144 tokens)** | 20.4 GiB | 15.9% | Chunked Q8 PagedAttention KV buffers (1.05M context total) |
+| **Prompt Cache RAM Tier (Hot Snapshots)** | 22.0 GiB | 17.2% | In-memory KV snapshot tier for instant multi-turn agent switching ([config](deploy/fastasfuck-server.conf)) |
 | **Turn Resume Points & Delta History** | 2.2 GiB | 1.7% | 32 in-RAM turn checkpoints (~0.11 GiB each) + deltas for agent backtrack/edits |
 | **PLE NVMe Streamer Row Cache** | 1.5 GiB | 1.2% | 8,388,608 dynamic n-gram hot rows cached in RAM |
 | **Working Scratch & Activation Buffers** | 0.4 GiB | 0.3% | HIP streams, GEMM workspaces, and WMMA accumulators |
@@ -182,7 +182,7 @@ The engine natively supports incremental session state via `previous_response_id
 sequenceDiagram
     autonumber
     actor Client as Codex CLI / OpenCode 2
-    participant Engine as strix_server (/v1/responses)
+    participant Engine as fastasfuck_server (/v1/responses)
     participant GPU as AMD Strix Halo (128 GB UMA)
 
     Note over Client,Engine: Turn 1: Cold Repository Ingestion (15,000 tokens)

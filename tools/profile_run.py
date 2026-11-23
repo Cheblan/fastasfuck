@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Profiles real Hybrid Q6 weights (weights-q6-hybrid.strixw) on AMD Strix Halo using rocprofv3 with ROCTX tracing.
+Profiles real Hybrid Q6 weights (weights-q6-hybrid.faf) on AMD Strix Halo using rocprofv3 with ROCTX tracing.
 1. Stops production server on 5300.
 2. Launches strix-roctx server under rocprofv3 on port 5300.
 3. Sends warmup ping, followed by queries targeting T = 1, T = 4, T = 16, T = 512, plus speculative generation.
@@ -21,7 +21,7 @@ import urllib.request
 
 ROCPROF = "/opt/rocm/bin/rocprofv3"
 TRACE_DIR = "/tmp/strix_trace"
-EXP_BIN = "/home/cheblan/strixite-main/build/strix-roctx/strix_server"
+EXP_BIN = "/home/cheblan/fastasfuck/build/strix-roctx/fastasfuck_server"
 EXP_CONF = "/home/cheblan/strix-server-hybrid.conf"
 PROD_SCRIPT = "/home/cheblan/run_thinkingcap.sh"
 
@@ -136,7 +136,7 @@ def main():
 
     finally:
         print("\n>>> STEP 5: Restoring Production Server on 5300...", flush=True)
-        subprocess.run("pkill -9 -f strix_server || true", shell=True)
+        subprocess.run("pkill -9 -f fastasfuck_server || true", shell=True)
         time.sleep(2)
         run_cmd(f"{PROD_SCRIPT} start")
         try:

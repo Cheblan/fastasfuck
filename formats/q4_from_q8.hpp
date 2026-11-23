@@ -1,6 +1,6 @@
 #pragma once
 
-// Q8 -> Q4 requantization (strixite PR #2 by @TheBeaninator):
+// Q8 -> Q4 requantization (upstream PR #2 by @TheBeaninator):
 // the MTP draft scores the LM head's first mtp_vocab rows every draft call, and those rows are Q8 in the served layout
 // (178 MB at 65,536 rows). The draft only proposes tokens - the verify decides every one - so it can read a cheaper Q4
 // copy (94 MB) made once at load.

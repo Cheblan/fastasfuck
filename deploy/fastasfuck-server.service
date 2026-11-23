@@ -1,17 +1,17 @@
 [Unit]
-Description=Strixite LLM Inference Engine (Qwen 3.8-Flash-Next on AMD Strix Halo gfx1151)
+Description=FastAsFuck LLM Inference Engine (Qwen 3.8-Flash-Next on AMD Strix Halo gfx1151)
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/strixite-main
+WorkingDirectory=%h/fastasfuck
 LimitMEMLOCK=infinity
 LimitNOFILE=1048576
 # Environment=HSA_OVERRIDE_GFX_VERSION=11.5.1  # Uncomment for older ROCm versions lacking native gfx1151 support
 Environment=HSA_DISABLE_COREDUMP_ON_EXCEPTION=1
-Environment=STRIX_WEIGHTS=/models/Thinking-Cap-Qwen-3.8-FN-strixw/weights.strixw
+Environment=STRIX_WEIGHTS=/models/Thinking-Cap-Qwen-3.8-FN-faf/weights.faf
 Environment=STRIX_EXTRA_ARGS=
-ExecStart=%h/strixite-main/build/strix/strix_server --config %h/strix-server-hybrid.conf --weights ${STRIX_WEIGHTS} $STRIX_EXTRA_ARGS
+ExecStart=%h/fastasfuck/build/strix/fastasfuck_server --config %h/fastasfuck-server.conf --weights ${STRIX_WEIGHTS} $STRIX_EXTRA_ARGS
 TimeoutStopSec=90
 Restart=on-failure
 RestartSec=10

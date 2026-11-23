@@ -4,39 +4,40 @@ cmake_minimum_required(VERSION 3.28)
 # Everything here runs before project(): that runs CMake's compiler ABI check, which already compiles and links a
 # trivial C++ program with the compiler and flags chosen below.
 #
-# STRIX_ROCM_ROOT: the TheRock ROCm install. Its clang compiles host and device alike. Set it with
-# -DSTRIX_ROCM_ROOT=PATH or the STRIX_ROCM_ROOT environment variable; the default is ~/tools/therock-tarball/install.
+# STRIX_ROCM_ROOT: the ROCm install. Its clang compiles host and device alike. Set it with
+# -DSTRIX_ROCM_ROOT=PATH or the STRIX_ROCM_ROOT environment variable; defaults to Arch Linux native /opt/rocm.
 # The compiler follows from it (lib/llvm/bin/clang++) unless CMAKE_CXX_COMPILER is given.
 if(NOT "$ENV{STRIX_ROCM_ROOT}" STREQUAL "")
     set(strix_rocm_default "$ENV{STRIX_ROCM_ROOT}")
     set(strix_rocm_from "the STRIX_ROCM_ROOT environment variable")
+elseif(EXISTS "/opt/rocm/include/hip/hip_runtime.h")
+    set(strix_rocm_default "/opt/rocm")
+    set(strix_rocm_from "native system /opt/rocm")
 else()
     set(strix_rocm_default "$ENV{HOME}/tools/therock-tarball/install")
     set(strix_rocm_from "the default")
 endif()
-set(STRIX_ROCM_ROOT "${strix_rocm_default}" CACHE PATH "TheRock ROCm install (its clang builds everything)")
+set(STRIX_ROCM_ROOT "${strix_rocm_default}" CACHE PATH "ROCm install (its clang builds everything)")
 if(NOT EXISTS "${STRIX_ROCM_ROOT}/include/hip/hip_runtime.h")
     message(FATAL_ERROR "STRIX_ROCM_ROOT=${STRIX_ROCM_ROOT} (from ${strix_rocm_from} or the cache) has no "
-                        "include/hip/hip_runtime.h - expected an extracted TheRock tarball there. Point at yours with "
+                        "include/hip/hip_runtime.h. Install native Arch Linux packages (pacman -S rocm-hip-sdk) or point at yours with "
                         "-DSTRIX_ROCM_ROOT=PATH or the STRIX_ROCM_ROOT environment variable.")
 endif()
-# C (only the vendored libwebp decoder, third_party/libwebp): the same TheRock clang, never the system cc.
+# C (only the vendored libwebp decoder, third_party/libwebp): the same clang, never the system cc.
 if(NOT DEFINED CACHE{CMAKE_C_COMPILER})
     set(CMAKE_C_COMPILER "${STRIX_ROCM_ROOT}/lib/llvm/bin/clang")
 endif()
 if(NOT DEFINED CACHE{CMAKE_CXX_COMPILER})
     set(CMAKE_CXX_COMPILER "${STRIX_ROCM_ROOT}/lib/llvm/bin/clang++")
     if(NOT EXISTS "${CMAKE_CXX_COMPILER}")
-        message(FATAL_ERROR "STRIX_ROCM_ROOT=${STRIX_ROCM_ROOT} has no lib/llvm/bin/clang++ - not a TheRock tarball layout")
+        message(FATAL_ERROR "STRIX_ROCM_ROOT=${STRIX_ROCM_ROOT} has no lib/llvm/bin/clang++")
     endif()
 endif()
 
-# Host C++ stdlib: TheRock's clang ships no usable host libstdc++/libc++ (its bundled libc++ is device-target only, no
-# x86_64 __config_site), so it uses a GCC install's. clang picks the newest one it finds, and the clang may be older
-# than that GCC's headers (the check after project() says so up front).
+# Host C++ stdlib: The ROCm clang uses native GCC install libstdc++.
 #   STRIX_GCC_INSTALL_DIR: the GCC install to use instead (clang --gcc-install-dir), e.g.
 #     /usr/lib/gcc/x86_64-pc-linux-gnu/14 - the directory holding that GCC's crtbegin.o.
-#   Otherwise, on Fedora 43 without gcc-c++/libstdc++-devel: Linuxbrew's gcc-15, which clang doesn't find on its own.
+#   On Arch Linux: native GCC / libstdc++ headers are used directly.
 # $CXXFLAGS is kept: a normal CMAKE_CXX_FLAGS set here shadows the cache entry project() fills from it.
 set(STRIX_GCC_INSTALL_DIR "" CACHE PATH "GCC install whose C++ stdlib clang uses (--gcc-install-dir); empty = clang's choice")
 set(STRIX_BREW_GCC_ROOT "/home/linuxbrew/.linuxbrew" CACHE PATH "Linuxbrew prefix providing gcc-15's C++ stdlib")
@@ -148,7 +149,7 @@ add_library(strix_formats STATIC
     formats/q6.cpp
     formats/q8.cpp
     formats/merge_plan.cpp
-    formats/strixw.cpp
+    formats/faf.cpp
     formats/ngram_table.cpp
     formats/convert_qwen4exp.cpp)
 target_include_directories(strix_formats PUBLIC "${CMAKE_SOURCE_DIR}")
@@ -161,8 +162,8 @@ target_link_libraries(convert_qwen4exp PRIVATE strix_formats)
 add_executable(convert_ngram_table tools/convert_ngram_table.cpp)
 target_link_libraries(convert_ngram_table PRIVATE strix_formats)
 
-add_executable(inspect_strixw tools/inspect_strixw.cpp)
-target_link_libraries(inspect_strixw PRIVATE strix_formats)
+add_executable(inspect_faf tools/inspect_faf.cpp)
+target_link_libraries(inspect_faf PRIVATE strix_formats)
 
 
 
@@ -186,7 +187,7 @@ target_include_directories(strix_kernels PUBLIC "${CMAKE_SOURCE_DIR}")
 target_link_libraries(strix_kernels PUBLIC strix_rocm strix_formats)
 
 add_library(strix_model STATIC runtime/qwen3_5.cpp runtime/qwen4exp.cpp runtime/vision_tower.cpp
-    runtime/strixw_loader.cpp runtime/ngram_rows.cpp runtime/ngram_table.cpp)
+    runtime/faf_loader.cpp runtime/ngram_rows.cpp runtime/ngram_table.cpp)
 target_link_libraries(strix_model PUBLIC strix_kernels strix_formats strix_runtime)
 # ROCTX ranges (common/trace.hpp) for profiler timelines - off in every shipping build.
 option(STRIX_ROCTX "Compile in ROCTX ranges (forward / layer / sublayer) for rocprofv3 --marker-trace" OFF)
@@ -258,8 +259,8 @@ target_link_libraries(strix_serve_model PUBLIC strix_serve strix_model)
 add_executable(check_stream_calls tools/check_stream_calls.cpp)
 target_link_libraries(check_stream_calls PRIVATE strix_serve)
 
-add_executable(strix_server tools/strix_server.cpp)
-target_link_libraries(strix_server PRIVATE strix_serve_model)
+add_executable(fastasfuck_server tools/fastasfuck_server.cpp)
+target_link_libraries(fastasfuck_server PRIVATE strix_serve_model)
 
 add_executable(test_split_invariance tools/test_split_invariance.cpp)
 target_link_libraries(test_split_invariance PRIVATE strix_serve_model)
@@ -287,7 +288,3 @@ target_link_libraries(bench_threshold_gemv_vs_wmma PRIVATE strix_kernels strix_f
 
 
 
-# The tutorials live in the public repo only; built when present.
-if(EXISTS "${CMAKE_SOURCE_DIR}/tutorial/CMakeLists.txt")
-    add_subdirectory(tutorial)
-endif()

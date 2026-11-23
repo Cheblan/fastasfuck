@@ -239,7 +239,7 @@ public:
     // state). A caller that only reads the byte map passes false.
     bool with_paged(const std::vector<int32_t> &prompt, int64_t n,
                     const std::function<void(const HostBuffer &, const PagedState &)> &use, bool consumed = true);
-    // Resume points (strixite #32 / #33). A client that edits a message it sent long ago (an agent pruning old tool
+    // Resume points (upstream #32 / #33). A client that edits a message it sent long ago (an agent pruning old tool
     // output, a front-end dropping old screenshots, an edited message) leaves no entry that matches past the edit
     // but the system prompt's: the recurrent state can only resume where it was saved. A point is a saved state's
     // small half alone (LmBackend::small_states - no K/V rows, ~0.11 GB at any depth) at a message boundary of a
@@ -284,7 +284,7 @@ public:
     // Without it a parked entry's eviction frees nothing until the engine's next drain - the rule would count
     // its pages as gone, read MemAvailable unchanged, and refuse (or evict the whole tier for nothing).
     // Granted, the bytes stay booked with the governor (every other room check sees them as spent) until the
-    // returned RoomGrant is released or destroyed - hold it until the allocation has landed (strixite #42: two slots
+    // returned RoomGrant is released or destroyed - hold it until the allocation has landed (upstream #42: two slots
     // passed on one reading and together took MemAvailable under the floor).
     using RetiredRelease = std::function<void(const std::vector<int64_t> &)>;
     class RoomGrant {

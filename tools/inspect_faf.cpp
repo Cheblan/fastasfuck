@@ -1,8 +1,8 @@
-// Prints a strixw file's metadata and tensor index (formats/strixw.hpp); --verify re-hashes every
-// component. Usage: inspect_strixw FILE [--verify] [--threads N]
+// Prints a faf file's metadata and tensor index (formats/faf.hpp); --verify re-hashes every
+// component. Usage: inspect_faf FILE [--verify] [--threads N]
 
 #include "common/args.hpp"
-#include "formats/strixw.hpp"
+#include "formats/faf.hpp"
 
 #include <cstdio>
 #include <exception>
@@ -27,18 +27,18 @@ int run(int argc, char **argv) {
         else if (a == "--threads" && i + 1 < argc) threads = (int)parse_int(argv[++i], "--threads", 1, 1024);
         else STRIX_CHECK(false, "unknown argument '", a, "'");
     }
-    const StrixwFile f(argv[1]);
-    std::printf("%s: strixw v%u, %llu bytes, data at %llu\n", f.path().c_str(), kStrixwVersion,
+    const FafFile f(argv[1]);
+    std::printf("%s: faf v%u, %llu bytes, data at %llu\n", f.path().c_str(), kFafVersion,
                 (unsigned long long)f.file_bytes(), (unsigned long long)f.data_offset());
     for (const auto &[k, v] : f.meta()) std::printf("  %-20s %s\n", k.c_str(), v.c_str());
     std::map<std::string, std::pair<int, uint64_t>> by_enc;
-    for (const StrixwTensor &t : f.tensors()) {
+    for (const FafTensor &t : f.tensors()) {
         std::string shape;
         for (int64_t d : t.shape) shape += (shape.empty() ? "" : " x ") + std::to_string(d);
-        std::printf("  %-14s %-24s %12llu B  %s%s\n", strixw_encoding_name(t.encoding), ("[" + shape + "]").c_str(),
+        std::printf("  %-14s %-24s %12llu B  %s%s\n", faf_encoding_name(t.encoding), ("[" + shape + "]").c_str(),
                     (unsigned long long)t.bytes(), t.name.c_str(),
                     t.parts.empty() ? "" : ("  (" + std::to_string(t.parts.size()) + " parts)").c_str());
-        auto &e = by_enc[strixw_encoding_name(t.encoding)];
+        auto &e = by_enc[faf_encoding_name(t.encoding)];
         e.first += 1, e.second += t.bytes();
     }
     for (const auto &[enc, e] : by_enc)
@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
     try {
         return run(argc, argv);
     } catch (const std::exception &e) {
-        std::fprintf(stderr, "inspect_strixw: %s\n", e.what());
+        std::fprintf(stderr, "inspect_faf: %s\n", e.what());
         return 1;
     }
 }

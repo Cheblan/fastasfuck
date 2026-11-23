@@ -349,7 +349,7 @@ public:
         (void)small, (void)paged, (void)n;
         STRIX_CHECK(false, "LmBackend::resume_paged: this backend (", describe(), ") has no paged states");
     }
-    // Resume points (strixite #32 / #33): a snapshot's small half alone - the per-step state (GDN, conv and
+    // Resume points (upstream #32 / #33): a snapshot's small half alone - the per-step state (GDN, conv and
     // indexer tails, PLE, MTP streams, the mRoPE header) without a single K/V row, ~0.11 GB however deep. The K/V
     // rows below a point are the same for every state that starts with the same tokens, so a point resumes over
     // any K/V that holds them: the live slot, or a longer entry of the same conversation loaded first. That is

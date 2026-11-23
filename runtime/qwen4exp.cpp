@@ -45,7 +45,7 @@ size_t es(Act a) { return a == Act::F32 ? 4 : 2; }
 
 // (BF16 bit conversions: strix::bf16_bits_to_f32 / f32_to_bf16_bits, common/bf16.hpp)
 
-Qwen4ExpModel::Hc load_hc(const StrixwDevice &w, const std::string &p, const Qwen4ExpDims &D, bool inject) {
+Qwen4ExpModel::Hc load_hc(const FafDevice &w, const std::string &p, const Qwen4ExpDims &D, bool inject) {
     const int64_t n4 = D.H * D.d;
     return {w.qw(p + "mix_down", {D.r + (inject ? D.H : 0), n4}), w.qw_chunk_major(p + "mix_up", {n4, D.r}),
             w.f32(p + "hc_norm.weight", {n4})};
@@ -79,8 +79,8 @@ Qwen4ExpModel::Qwen4ExpModel(const std::string &weights, const std::string &ngra
     STRIX_CHECK(act == Act::F32 || act == Act::BF16, "Qwen4ExpModel: unsupported activation dtype ", (int)act);
     STRIX_CHECK(std::isfinite(yarn_factor) && yarn_factor >= 1.0f && yarn_factor <= 8.0f, "Qwen4ExpModel: yarn_factor = ",
                 yarn_factor, ", expected 1 (RoPE as trained) .. 8");
-    w_ = std::make_unique<StrixwDevice>(weights, 8, placement);
-    const StrixwFile &f = w_->file();
+    w_ = std::make_unique<FafDevice>(weights, 8, placement);
+    const FafFile &f = w_->file();
     dims_ = qwen4exp_dims_from_file(f);  // the layer count and kind pattern, read off the index
     Qwen4ExpDims &D = dims_;
     std::string prefix;  // "0,1,..,k-1": what a truncated conversion's layers metadata reads
@@ -98,12 +98,12 @@ Qwen4ExpModel::Qwen4ExpModel(const std::string &weights, const std::string &ngra
         STRIX_CHECK(f.meta("shared_expert") == (shared_separate_ ? "separate" : "stacked"), "Qwen4ExpModel: '", weights,
                     "' has shared_expert metadata '", f.meta("shared_expert"), "' but layer 0's shared expert is ",
                     shared_separate_ ? "separate" : "stacked");
-    // How many routed experts per layer: the tensors decide (strixite PR #35), like the shared expert's placement.
+    // How many routed experts per layer: the tensors decide (upstream PR #35), like the shared expert's placement.
     D.experts = qwen4exp_routed_experts(f.find(kLm + "layers.0.mlp.experts_gate_up"), D, shared_separate_,
                                         "Qwen4ExpModel: '" + weights + "' " + kLm + "layers.0.mlp.experts_gate_up");
     const int64_t n4 = D.H * D.d, Estack = D.experts + (shared_separate_ ? 0 : 1);
     const auto &emb_info = f.get(kLm + "embed_tokens.weight");
-    if (emb_info.encoding == StrixwEncoding::Q8RowMajor) {
+    if (emb_info.encoding == FafEncoding::Q8RowMajor) {
         embed_q8_ = w_->q8(kLm + "embed_tokens.weight", {D.vocab, D.d});
     } else {
         embed_ = w_->bf16(kLm + "embed_tokens.weight", {D.vocab, D.d});
@@ -220,7 +220,7 @@ Qwen4ExpModel::Qwen4ExpModel(const std::string &weights, const std::string &ngra
 }
 
 const VisionTower &Qwen4ExpModel::vision() const {
-    STRIX_CHECK(vision_ != nullptr, "Qwen4ExpModel: no vision tower - construct with the vision.strixw path "
+    STRIX_CHECK(vision_ != nullptr, "Qwen4ExpModel: no vision tower - construct with the vision.faf path "
                 "to load one (image forwards refuse without it, there is no fallback path)");
     return *vision_;
 }
@@ -650,7 +650,7 @@ int64_t kv_generations_that_fit(const Qwen4ExpDims &D, size_t act_bytes, int64_t
     return std::max<int64_t>(g, 0);
 }
 
-int64_t qwen4exp_routed_experts(const StrixwTensor *gate_up, const Qwen4ExpDims &D, bool shared_separate,
+int64_t qwen4exp_routed_experts(const FafTensor *gate_up, const Qwen4ExpDims &D, bool shared_separate,
                                 const std::string &where) {
     STRIX_CHECK(D.inter >= 1 && D.d >= 1 && D.top_k >= 1, where, ": dims inter ", D.inter, ", d ", D.d, ", top_k ",
                 D.top_k, ", expected each >= 1");
@@ -668,7 +668,7 @@ int64_t qwen4exp_routed_experts(const StrixwTensor *gate_up, const Qwen4ExpDims 
     return routed;
 }
 
-Qwen4ExpDims qwen4exp_dims_from_file(const StrixwFile &f) {
+Qwen4ExpDims qwen4exp_dims_from_file(const FafFile &f) {
     Qwen4ExpDims D;
     while (f.find(kLm + "layers." + std::to_string(D.layers) + ".attn_hyper_connection.mix_down")) ++D.layers;
     STRIX_CHECK(D.layers >= 1, "qwen4exp_dims_from_file: no decoder layers in '", f.path(), "'");
@@ -2639,7 +2639,7 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
     if (image != nullptr) {
         const char *ifn = "Qwen4ExpSession::forward(image)";
         STRIX_CHECK(m_.has_vision(), ifn, ": the model was loaded without a vision tower - construct "
-                    "Qwen4ExpModel with the vision.strixw path to enable image input");
+                    "Qwen4ExpModel with the vision.faf path to enable image input");
         tower = &m_.vision();
         STRIX_CHECK(image->grid_t == 1, ifn, ": grid_t = ", image->grid_t, ", expected 1 (a single image; "
                     "the tower runs one temporal segment)");

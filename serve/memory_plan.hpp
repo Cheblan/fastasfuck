@@ -1,6 +1,6 @@
 #pragma once
 
-// The startup memory check (strixite issue #6: a 27B sidecar next to the server left MemAvailable at 0.4 GiB, and the
+// The startup memory check (upstream issue #6: a 27B sidecar next to the server left MemAvailable at 0.4 GiB, and the
 // GPU allocating from the same RAM turned that into driver faults and a segfault instead of a clean error). Run once
 // after the weights and every GPU buffer are allocated - nothing on the GPU grows after that - with MemAvailable
 // measured then. What can still grow is host RAM: the prompt cache (its RAM tier, spare buffers, the export buffer of

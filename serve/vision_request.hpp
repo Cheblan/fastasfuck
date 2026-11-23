@@ -27,7 +27,7 @@ namespace strix::vision {
 // alongside the served weights. Built once at startup (strix_server); the HTTP layer only reads it.
 struct ServedVision {
     PreprocConfig cfg;
-    std::string vision_weights;  // vision.strixw ("" only before configure - a served engine has one)
+    std::string vision_weights;  // vision.faf ("" only before configure - a served engine has one)
     int32_t image_token_id = 0;  // config.json image_token_id (the template's image_pad row id)
 };
 

@@ -4,7 +4,7 @@
 #include "serve/vision_request.hpp"
 
 #include "common/check.hpp"
-#include "formats/strixw.hpp"  // strix_hash64 (the same 64-bit hash the prompt cache's keys use)
+#include "formats/faf.hpp"  // strix_hash64 (the same 64-bit hash the prompt cache's keys use)
 #include "serve/json.hpp"
 
 #include <cctype>

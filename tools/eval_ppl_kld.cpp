@@ -91,10 +91,10 @@ std::vector<TokenCandidate> get_top_k(const float *z, int64_t V, double log_sum_
 } // namespace
 
 int main(int argc, char **argv) {
-    std::string weights_q8 = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/weights.strixw";
-    std::string weights_q6 = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/weights-q6-hybrid.strixw";
-    std::string ngram_path = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/ngram.table";
-    std::string tokenizer_path = "/models/Thinking-Cap-Qwen-3.8-FN-strixw/tokenizer.json";
+    std::string weights_q8 = "/models/Thinking-Cap-Qwen-3.8-FN-faf/weights.faf";
+    std::string weights_q6 = "/models/Thinking-Cap-Qwen-3.8-FN-faf/weights-q6-hybrid.faf";
+    std::string ngram_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/ngram.table";
+    std::string tokenizer_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/tokenizer.json";
     std::string text_path = "/models/wikitext-2-test.txt";
     std::string output_dir = "/models/ppl_kld_eval";
     int64_t num_eval_tokens = 2048;
@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
     std::string q8_tmp_bin = output_dir + "/q8_logits_temp.bin";
 
     std::cout << "=================================================================" << std::endl;
-    std::cout << "  STRIXITE GROUND-TRUTH ACCURACY & DIVERGENCE BENCHMARK (PPL/KLD)" << std::endl;
+    std::cout << "  FASTASFUCK GROUND-TRUTH ACCURACY & DIVERGENCE BENCHMARK (PPL/KLD)" << std::endl;
     std::cout << "=================================================================" << std::endl;
     std::cout << "Q8 Baseline Weights : " << weights_q8 << std::endl;
     std::cout << "Hybrid Q6 Weights   : " << weights_q6 << std::endl;

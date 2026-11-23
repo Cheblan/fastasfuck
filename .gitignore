@@ -1,1 +1,16 @@
 build/
+__pycache__/
+*.pyc
+*.pyo
+
+# Local scratch and experiment benches
+bench_*.hip
+tools/measure_split_kernels.cpp
+tools/profile_split.cpp
+tools/run_*_bench.py
+tools/test_*.hip
+tools/test_*.cpp
+tools/sweep_topk.cpp
+tools/verify_topk.cpp
+tools/mtp_train/
+

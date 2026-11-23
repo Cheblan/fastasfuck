@@ -186,7 +186,7 @@ HttpServer::HttpServer(Engine &engine, const Tokenizer &tok, ServerConfig cfg)
 
     svr_->set_payload_max_length(cfg_.max_body_bytes);
     // The default 5 s is httplib's, sized for local APIs: a multi-MB history over a weak Wi-Fi uplink can pause
-    // longer than that mid-body (strixite #15).
+    // longer than that mid-body (upstream #15).
     svr_->set_read_timeout(cfg_.request_read_timeout_s, 0);
 
     // Standard CORS headers on all responses
@@ -1392,7 +1392,7 @@ void HttpServer::routes() {
             m.set("id", json::Value::string(id));
             m.set("object", json::Value::string("model"));
             m.set("created", json::Value::integer(started_));
-            m.set("owned_by", json::Value::string("strixite"));
+            m.set("owned_by", json::Value::string("fastasfuck"));
             m.set("context_length", json::Value::integer(engine_.capacity()));
             data.push(std::move(m));
         };
@@ -1423,7 +1423,7 @@ void HttpServer::routes() {
         m.set("id", json::Value::string(model_id));
         m.set("object", json::Value::string("model"));
         m.set("created", json::Value::integer(started_));
-        m.set("owned_by", json::Value::string("strixite"));
+        m.set("owned_by", json::Value::string("fastasfuck"));
         m.set("context_length", json::Value::integer(engine_.capacity()));
         res.set_content(m.dump(), "application/json");
     });
@@ -1730,7 +1730,7 @@ void HttpServer::routes() {
     });
 
     // One handler for every error status. 404 gets its JSON body; a 400 whose body never fully arrived gets turned
-    // into the retryable 408 the client can act on (strixite #15: httplib answers the abandoned read itself,
+    // into the retryable 408 the client can act on (upstream #15: httplib answers the abandoned read itself,
     // before any route ran - an empty, unlogged 400, which OpenCode took for its own fault and stopped the
     // session; the OpenAI SDKs retry 408 and x-should-retry, not 400). Errors raised inside a route carry their own JSON and pass
     // through untouched, as do parse failures (which never get a POST's framing).
