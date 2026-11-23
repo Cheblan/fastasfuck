@@ -26,7 +26,7 @@ Designed for heavy concurrent coding workloads (OpenCode 2, Codex CLI, Cursor) w
 
 ## Production Verification & Performance
 
-All benchmarks were executed on bare metal running Arch Linux (Kernel 7.3-zen) with recommended kernel headroom (`ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=always`) under the [Recommended Hybrid Q6 Quantization Layout](docs/WEIGHTS.md).
+All benchmarks were executed on bare metal running Arch Linux (Kernel 7.3-zen) with recommended kernel headroom (`ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=always`) using **ThinkingCap** weights (`Thinking-Cap-Qwen-3.8-FN`) under the [Recommended Hybrid Q6 Quantization Layout](docs/WEIGHTS.md).
 
 Full methodology, per-prompt latency distributions, and reproducibility scripts: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 

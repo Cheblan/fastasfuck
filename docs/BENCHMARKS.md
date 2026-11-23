@@ -11,11 +11,14 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 | **Unified DRAM** | 128 GB Unified LPDDR5X-8533 on a 256-bit memory bus (~273.0 GB/s theoretical peak) |
 | **Operating System** | Arch Linux (Linux Kernel 7.3-zen, x86_64) |
 | **Kernel Command Line** | `ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=always` |
-| **Target Model** | Qwen 3.8-Flash-Next (128.4B MoE, 512 experts, top-10 active per token, 48 layers) |
+| **Target Model** | Qwen 3.8-Flash-Next (benchmarked on **ThinkingCap** weights: `Thinking-Cap-Qwen-3.8-FN`, 128.4B MoE, 512 experts, top-10 active per token, 48 layers) |
 | **Production Quantization** | **Hybrid Q6 / Q4 / Q8** (`weights-q6-hybrid.faf`, ~65.5 GiB footprint) |
 | **KV Cache Precision** | 8-bit Quantized (`kv-cache = q8`) |
 | **Speculative Decoding** | Multi-Token Prediction (MTP) with 7 draft steps and 8M-row PLE n-gram table |
 | **Serving Configuration** | `chunk = 4096`, `chunk-shared = 1024` (DRR GpuArbiter production default) |
+
+> [!NOTE] Model Weights Baseline
+> All benchmark trials, deterministic token outputs, and golden SHA-256 hashes presented below were captured using the **ThinkingCap** RL fine-tuned weights (`Thinking-Cap-Qwen-3.8-FN`) under the 14-field Hybrid Q6 layout (`weights-q6-hybrid.faf`) and its corresponding model-specific speculative n-gram table.
 
 ---
 
