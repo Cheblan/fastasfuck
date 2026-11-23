@@ -20,7 +20,7 @@ This document specifies the exact quantization geometry, memory layout, and tens
 
 ## 2. Production Layout Specification (14-Field Schema)
 
-The production model file (`weights-q6-hybrid.faf`) is built according to the 14-field layout configuration:
+The production model file (`weights.faf`, with backward-compatible symlink `weights-q6-hybrid.faf`) is built according to the 14-field layout configuration:
 
 ```text
 layout = exp_gu=q4g128,exp_down=q4g128,sh_gu=q6g64,sh_down=q6g64,gdn_in=q4g128,gdn_out=q6g64,attn_qkv=q6g64,attn_o=q6g64,hc_down=q8g64,hc_up=q8g64,ple_kv=q6g64,lm_head=q8g64,mtp_fc=q4g64,embed=bf16
@@ -71,7 +71,7 @@ In `deploy/fastasfuck-server.conf`:
 
 ```ini
 # Path to packed .faf weights
-weights = /models/Thinking-Cap-Qwen-3.8-FN-faf/weights-q6-hybrid.faf
+weights = /models/Thinking-Cap-Qwen-3.8-FN-faf/weights.faf
 
 # Dedicated n-gram streaming table on NVMe
 ngram = /models/Thinking-Cap-Qwen-3.8-FN-faf/ngram.table

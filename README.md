@@ -89,7 +89,7 @@ On AMD Strix Halo, the Zen 5 CPU and RDNA 3.5 GPU share physical LPDDR5X-8533 un
 
 | Memory Component | Allocation | Share of RAM | Engineering Function |
 |---|---|---|---|
-| **Model Weights (`weights-q6-hybrid.faf`)** | 65.5 GiB | 51.2% | Resident in GPU-accessible DRAM ([format specification](docs/WEIGHTS.md)) |
+| **Model Weights (`weights.faf`)** | 65.5 GiB | 51.2% | Resident in GPU-accessible DRAM ([format specification](docs/WEIGHTS.md)) |
 | **KV Cache (4 slots × 262,144 tokens)** | 20.4 GiB | 15.9% | Chunked Q8 PagedAttention KV buffers (1.05M total context) |
 | **Prompt Cache RAM Tier (Hot Snapshots)** | 22.0 GiB | 17.2% | In-memory KV snapshot tier for instant multi-turn agent switching ([config](deploy/fastasfuck-server.conf)) |
 | **Turn Resume Points & Delta History** | 2.2 GiB | 1.7% | 32 in-RAM turn checkpoints (~0.11 GiB each) + deltas for agent backtrack/edits |
