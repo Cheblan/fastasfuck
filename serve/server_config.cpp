@@ -261,13 +261,13 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
          "seconds a connection may go silent while its request body is still arriving before the read is abandoned "
          "and a retryable 408 goes out; per-read inactivity, not total upload time (httplib's default was 5 s, too "
          "short for multi-MB histories over weak Wi-Fi - upstream #15)"},
-        {"slot-capacity", K::Int, 4096, 1 << 20, "524288",
+        {"slot-capacity", K::Int, 4096, 1 << 20, "262144",
          "positions per slot/session (at most 262144 x rope-yarn-factor)"},
-        {"capacity", K::Int, 4096, 1 << 20, "524288",
+        {"capacity", K::Int, 4096, 1 << 20, "262144",
          "alias for slot-capacity (backward compatibility)", "slot-capacity"},
         {"total-capacity", K::Int, 0, 1 << 24, "0",
          "global physical capacity ceiling across all slots in tokens; 0 = unconstrained by a global ceiling"},
-        {"total-slots", K::Int, 1, 8, "2",
+        {"total-slots", K::Int, 1, 8, "4",
          "conversations served at once, each its own state at the full capacity (one slot's state is ~8 GiB at 512k "
          "with 8-bit K/V); requests past them wait in arrival order. Startup refuses a count the memory doesn't hold, "
          "naming the one that fits"},
@@ -286,8 +286,8 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
         {"rope-yarn-factor", K::Number, 1, 8, "2",
          "YaRN context extension: positions as trained (262144) x this; 1 = off (RoPE as trained). A change makes "
          "the prompt cache's entries from the other setting unusable (dropped at startup)"},
-        {"chunk", K::Int, 1, 16384, "16384", "prefill chunk in tokens; progress and cancellation are checked per chunk"},
-        {"chunk-shared", K::Int, 0, 16384, "2048",
+        {"chunk", K::Int, 1, 16384, "4096", "prefill chunk in tokens; progress and cancellation are checked per chunk"},
+        {"chunk-shared", K::Int, 0, 16384, "1024",
          "prefill chunk in tokens while another slot is decoding (several slots): a slot's chunk holds the GPU, so the "
          "other slots' decode steps run only between chunks; 0 = always the full chunk"},
         {"model-id", K::Text, 0, 0, server.model_id, "the model name the API reports"},
@@ -352,8 +352,8 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
         {"mtp-bias", K::Number, -100.0, 100.0, "0.0", "MTP cost-gating sigmoid bias shift"},
         {"mtp-lut-step-penalty", K::Number, 0.0, 1.0, "0.015", "MTP cost-gating LUT step penalty deduction"},
         {"mtp-ema-decay", K::Number, 0.01, 1.0, "0.15", "MTP cost-gating Renewal-Reward EMA smoothing factor"},
-        {"mtp-vocab", K::Int, 0, 1 << 30, "65536", "MTP: drafts are scored over token ids [0, N); 0 = the whole vocabulary"},
-        {"mtp-vocab-filter", K::Text, 0, 0, "all",
+        {"mtp-vocab", K::Int, 0, 1 << 30, "0", "MTP: drafts are scored over token ids [0, N); 0 = the whole vocabulary"},
+        {"mtp-vocab-filter", K::Text, 0, 0, "en+ru",
          "MTP draft vocabulary filter preset (all, en+ru, en, no-cjk) or comma-separated sections "
          "(core,latin,cyrillic,greek,digits,punct,code,cjk,arabic,asian,other)"},
         {"draft-head-q4", K::OnOff, 0, 0, "on",
