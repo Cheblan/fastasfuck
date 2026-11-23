@@ -13,9 +13,12 @@ namespace strix {
 
 namespace {
 
-// The pre-tokenizer pattern this implementation hand-codes; a tokenizer.json with any other is refused.
+// The pre-tokenizer patterns this implementation supports.
 constexpr const char *kPattern =
     "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|"
+    "\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+constexpr const char *kPatternNoMark =
+    "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|"
     "\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 
 // GPT-2's byte-level alphabet: printable bytes map to themselves, the other 68 to U+0100.. in byte order.
@@ -56,8 +59,6 @@ void expect_bool(const json::Value &v, const char *key, bool want, const std::st
 
 void check_byte_level(const json::Value &v, const std::string &where) {
     expect_str(v, "type", "ByteLevel", where);
-    expect_bool(v, "add_prefix_space", false, where);
-    expect_bool(v, "use_regex", false, where);
 }
 
 bool apostrophe_s(uint32_t c) { return c == 's' || c == 'S' || c == 0x17F; }  // (?i) also folds U+017F LONG S to s
@@ -84,7 +85,8 @@ Tokenizer::Tokenizer(const std::string &path) {
     const auto &pres = need(pre, "pretokenizers", p).as_array(p + ".pre_tokenizer.pretokenizers");
     STRIX_CHECK(pres.size() == 2, "Tokenizer: ", p, ": ", pres.size(), " pre-tokenizers, expected Split + ByteLevel");
     expect_str(pres[0], "type", "Split", p + ".pretokenizers[0]");
-    expect_str(need(pres[0], "pattern", p), "Regex", kPattern, p + ".pretokenizers[0].pattern");
+    const std::string &pat = need(pres[0], "pattern", p).find("Regex")->as_string(p + ".pretokenizers[0].pattern.Regex");
+    STRIX_CHECK(pat == kPattern || pat == kPatternNoMark, "Tokenizer: ", p, ".pretokenizers[0].pattern.Regex is '", pat, "', unsupported");
     expect_str(pres[0], "behavior", "Isolated", p + ".pretokenizers[0]");
     expect_bool(pres[0], "invert", false, p + ".pretokenizers[0]");
     check_byte_level(pres[1], p + ".pretokenizers[1]");
