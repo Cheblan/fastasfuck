@@ -8,18 +8,16 @@
 #       -p 5300:5300 \
 #       -v /path/to/models:/models \
 #       ghcr.io/cheblan/fastasfuck:latest
-#
-# Multi-stage build:
-# 1. build: compiles fastasfuck on Arch Linux using native Arch ROCm packages (rocm-hip-sdk, rocm-llvm, cmake, ninja).
-# 2. runtime: minimal Arch Linux base image with only the HIP runtime (hip-runtime-amd), keeping image lean (~1.18 GiB).
 
 # --- Stage 1: Build ---
 FROM docker.io/archlinux:base-devel AS build
 
-# Install Arch ROCm development toolchain and build tools
-RUN pacman -Syu --noconfirm && \
+# Configure fast mirrors and parallel downloads
+RUN printf 'Server = https://mirror.yandex.ru/archlinux/$repo/os/$arch\nServer = https://wan.metrosg.ru/archlinux/$repo/os/$arch\nServer = https://mirror.truenetwork.ru/archlinux/$repo/os/$arch\nServer = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > /etc/pacman.d/mirrorlist && \
+    sed -i 's/^#ParallelDownloads/ParallelDownloads/' /etc/pacman.conf && \
+    pacman -Sy --noconfirm && \
     pacman -S --noconfirm --needed \
-        rocm-hip-sdk \
+        hip-runtime-amd \
         rocm-llvm \
         cmake \
         ninja \
@@ -45,11 +43,12 @@ RUN mkdir -p /opt/fastasfuck/bin /opt/fastasfuck/share && \
 # --- Stage 2: Runtime ---
 FROM docker.io/archlinux:base AS runtime
 
-# Install ONLY the runtime HIP stack (hip-runtime-amd) - NO bloated rocblas / miopen
-RUN pacman -Syu --noconfirm && \
-    pacman -S --noconfirm --needed \
+# Configure fast mirrors and install ONLY runtime HIP stack (hip-runtime-amd) - NO bloated rocblas / miopen
+RUN printf 'Server = https://mirror.yandex.ru/archlinux/$repo/os/$arch\nServer = https://wan.metrosg.ru/archlinux/$repo/os/$arch\nServer = https://mirror.truenetwork.ru/archlinux/$repo/os/$arch\nServer = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n' > /etc/pacman.d/mirrorlist && \
+    sed -i 's/^#ParallelDownloads/ParallelDownloads/' /etc/pacman.conf && \
+    pacman -Syu --noconfirm --overwrite '*' && \
+    pacman -S --noconfirm --needed --overwrite '*' \
         hip-runtime-amd && \
-    pacman -Scc --noconfirm && \
     rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/* /tmp/*
 
 COPY --from=build /opt/fastasfuck /opt/fastasfuck
