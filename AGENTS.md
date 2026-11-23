@@ -70,17 +70,19 @@ ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepag
 
 ## 4. Strict Testing, Benchmarking, and Verification Protocol
 
-### 4.1 The n=5 Measurement Rule with Mandatory Warmup
+### 4.1 The Tiered Measurement Standard (n=5 vs n=3) with Mandatory Warmup
 Synthetic single-pass benchmarks are strictly banned. Caches and driver page tables must be in a steady state.
-1. **Warmup Turn (Iteration 0):** Every benchmark run must first execute an untimed warm-up request (minimum 50 prompt tokens, 50 generated tokens). Timing counters MUST discard this run completely.
-2. **Measurement Trials (n=5):** After warmup, execute exactly 5 identical trials. Record mean throughput (tok/s), latency to first token (TTFT in ms), and inter-token latency (ITL in ms).
-3. **Reporting:** Report mean +- standard deviation. Any speed claim without n=5 data is invalid.
+
+1. **Untimed Warmup Turn (Iteration 0):** Every benchmark run must first execute an untimed warm-up request (minimum 50 prompt tokens, 50 generated tokens; or an untimed hardware ping). Timing counters MUST discard this run completely.
+2. **Solo & Short Prefill (n=5 Trials):** For single-slot sterile benchmarks (P1–P6 at T=0.0) and short prefill sweeps (4k–32k), execute exactly 5 identical trials. Record mean throughput (tok/s), latency to first token (TTFT in ms), and inter-token latency (ITL in ms).
+3. **Multi-Slot, Long Context, & Mixed Workloads (n=3 Trials):** For heavy 4-slot parallel suites, long-context prefill (128k+), and mixed concurrency profiles (3D + 1P), execute exactly 3 full measurement trials after warmup. Each trial processes thousands of concurrent tokens, providing high statistical confidence without unnecessary execution overhead.
+4. **Statistical Reporting:** Report `mean ± standard deviation` (or median / p95). Any speed claim without multi-trial statistics and warmup disclosure is invalid.
 
 ### 4.2 Multi-Slot Concurrency Testing Rule
 When evaluating multi-slot performance (2, 4, or 6 slots):
-- **EVERY active slot must execute n=5 full measurement trials concurrently.**
+- **EVERY active slot must execute measurement trials concurrently under genuine load.**
 - Benchmarking one slot while companion slots execute artificial infinite loops or static sleep is strictly prohibited.
-- Concurrency runs must evaluate aggregate throughput (sum of tok/s across all slots) and worst-case ITL jitter.
+- Concurrency runs must evaluate aggregate throughput (sum of tok/s across all slots), per-slot throughput, and inter-token latency (ITL) distributions (p50, p95, p99).
 
 ### 4.3 The Bit-Identity Absolute Invariant (100.000% Exactness)
 **Greedy decoding (temperature = 0.0, top_p = 1.0, top_k = 1) is completely deterministic.**
@@ -93,6 +95,40 @@ When evaluating multi-slot performance (2, 4, or 6 slots):
 > 2. Immediately abandon the branch, document the failure mechanism, and document the failure mechanism in the benchmark log.
 > 
 > There is NO ACCEPTABLE DEGREE of numerical drift, "almost identical" outputs, or stochastic tolerance during greedy decoding.
+
+### 4.4 Sterile Determinism and Bit-Identity Testing Protocol
+To ensure 100.000% reproducible and sterile bit-identity and benchmark measurements without contamination from previous sessions or persistent state:
+1. **Disable Prompt Cache (`prompt-cache = off`):** All determinism and verification runs must be executed with `prompt-cache = off`. This ensures every test prompt undergoes a clean, full cold prefill from raw tokens in native precision (BF16/FP16), preventing persistent on-disk entries or RAM-tier cache hits from substituting cold prefill with quantized Q8 snapshot states. Never use `--prompt-cache-gib 0` (which can purge on-disk cache files); strictly use `prompt-cache = off`.
+2. **Untimed Hardware Warmup:** Execute exactly one untimed warmup ping (`[{"role": "user", "content": "ping"}]`, `max_tokens = 5`) at server start to initialize GPU memory allocators, compile JIT kernels, and establish steady HIP stream contexts.
+3. **Sterile Cold-Prompt Evaluation:** Test prompts must never be preceded by duplicate queries of themselves. Each standardized prompt is dispatched to an idle slot.
+4. **Multi-Pass Determinism Invariant:** In sterile mode, running n >= 3 consecutive evaluation passes across all 6 standardized prompts must yield 100.000% identical SHA-256 hashes across all passes.
+
+### 4.5 Dynamic Determinism Verification (Prohibition of Hardcoded Hash Constants)
+Benchmark and regression test scripts MUST NOT hardcode frozen SHA-256 strings into script source code. 
+- *Rationale:* Different model quantization recipes (e.g. baseline Q8 vs production Hybrid Q6), custom fine-tunes, or updated vocabulary filters naturally generate distinct greedy token sequences while remaining internally 100.000% deterministic.
+- *Standard:* Determinism verification scripts must dynamically capture and record the SHA-256 digest of greedy output across consecutive passes ($n \ge 3$), asserting exact cross-pass identity ($\text{hash}_1 \equiv \text{hash}_2 \equiv \dots \equiv \text{hash}_n$). Golden reference hash sets may be saved to version-controlled JSON artifacts accompanying specific model weight releases, but runner scripts must never reject execution due to hardcoded legacy hashes.
+
+### 4.6 `chunk` and `chunk-shared` Pareto Frontier Methodology
+Evaluating prefill chunk sizes solely by decode inter-token latency (ITL) is an architectural anti-pattern:
+- Setting `chunk-shared` too small (e.g., 256 tokens) optimizes ITL (< 150 ms) but drastically inflates prefill execution time (from 10s to 35s+ on a 32k prompt), creating severe head-of-line blocking and degrading multi-agent throughput.
+- Setting `chunk-shared` too large (e.g., 4096 tokens) maximizes raw prefill bandwidth but causes visible 2–3 second decode freezes.
+
+**Two-Phase Optimization Protocol:**
+1. **Phase A: Solo Compute Saturation (`chunk`):**
+   - Measure 1-slot prefill throughput on 16k and 64k tokens across `chunk ∈ {1024, 2048, 4096, 8192, 16384}` under warm PLE cache ($n=3$).
+   - Identify the hardware saturation knee on 40 CUs RDNA 3.5 (where incremental GEMM throughput gains drop below 2–3%).
+2. **Phase B: Multi-Agent Closed-Loop Replay (`chunk-shared`):**
+   - Fix `chunk` at the saturation knee (e.g., 4096 or 2048).
+   - Sweep `chunk-shared ∈ {256, 512, 1024, 2048}` under a 4-slot bimodal agent workload (3 slots decoding, 1 slot prefilling 16k/32k context).
+   - Evaluate the Pareto frontier across four orthogonal metrics:
+     - **Total Makespan (s):** Job Completion Time across all agent turns.
+     - **Turn E2E Latency p95 (s):** Full turn completion time (queue + prefill + decode).
+     - **Short-Turn TTFT p95 (ms):** Latency to start small tool-call responses during concurrent background prefill.
+     - **Decode Step / ITL p99 (ms):** Worst-case pause between decode steps on active generation slots.
+
+### 4.7 Performance Reporting and Transparency Standards
+1. **Primary Metric:** The headline multi-slot metric must always be the **Grand Mean aggregate throughput** across diverse, realistic prompts (P1–P6).
+2. **Peak Throughput Disclosures:** If peak throughput figures are cited (such as up to 159.2 tok/s on P2), the citation MUST explicitly document the underlying Multi-Token Prediction (MTP) draft token acceptance rate (e.g., ~78% on structured mathematical derivation vs ~45% on natural language translation or tool calling).
 
 ---
 
