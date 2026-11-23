@@ -159,9 +159,11 @@ On AMD Strix Halo, CPU and GPU share 128 GB Unified LPDDR5X DRAM on a 256-bit bu
 |---|---|---|---|
 | **Model Weights (`weights-q6-hybrid.strixw`)** | 65.5 GiB | 51.2% | MoE weights resident in GPU-accessible DRAM ([layout guide](weights.md)) |
 | **KV Cache (4 slots × 262,144 tokens)** | 20.4 GiB | 15.9% | Chunked Q8 PagedAttention KV buffers ($1.05\text{M}$ context total) |
+| **Prompt Cache RAM Tier (Hot Snapshots)** | 22.0 GiB | 17.2% | In-memory KV snapshot tier for instant multi-turn agent switching ([config](deploy/strix-server.conf)) |
+| **Turn Resume Points & Delta History** | 2.2 GiB | 1.7% | 32 in-RAM turn checkpoints (~0.11 GiB each) + deltas for agent backtrack/edits |
 | **PLE NVMe Streamer Row Cache** | 1.5 GiB | 1.2% | 8,388,608 dynamic n-gram hot rows cached in RAM |
 | **Working Scratch & Activation Buffers** | 0.4 GiB | 0.3% | HIP streams, GEMM workspaces, and WMMA accumulators |
-| **Kernel Headroom & Linux OS Safety Margin** | 40.2 GiB | 31.4% | Protected headroom for kernel slabs, networking buffers, and user processes |
+| **Kernel Headroom & Linux OS Safety Margin** | 16.0 GiB | 12.5% | Protected headroom for kernel slabs, page tables, networking, and direct reclaim safety |
 | **Total Physical DRAM** | **128.0 GiB** | **100.0%** | **Guaranteed zero direct memory reclaim storms** |
 
 ---

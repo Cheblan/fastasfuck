@@ -188,7 +188,7 @@ def run_phase_b_pareto(pairs: List[Tuple[int, int]]) -> Dict[str, Any]:
             # Collect step latencies
             all_steps: List[float] = []
             for dr in dec_res:
-                all_steps.extend(dr.get("step_intervals_ms", []))
+                all_steps.extend(dr.get("itls_ms", dr.get("step_intervals_ms", [])))
             s_stats = summarize_series(all_steps)
             step_p99s.append(s_stats["p99"])
 
