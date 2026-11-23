@@ -61,4 +61,5 @@ ENV PATH=/opt/fastasfuck/bin:/usr/bin:/bin \
 VOLUME /models
 EXPOSE 5300
 
-ENTRYPOINT ["/opt/fastasfuck/bin/fastasfuck_server", "--config", "/opt/fastasfuck/fastasfuck-server.conf"]
+ENTRYPOINT ["/opt/fastasfuck/bin/fastasfuck_server"]
+CMD ["--config", "/opt/fastasfuck/fastasfuck-server.conf"]
