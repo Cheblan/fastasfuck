@@ -15,10 +15,9 @@
 
 #include <cstdint>
 
-namespace strix::kernels {
+#include "kernels/types.hpp"
 
-enum class Act { F32, BF16 };
-const char *act_name(Act a);
+namespace strix::kernels {
 
 // out = cast(x * rsqrt(mean(x^2) + eps) * (1 + w)); w has d elements.
 // Used for input/post-attention/final norms (d = hidden) and q_norm/k_norm

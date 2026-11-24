@@ -4,7 +4,7 @@
 // x = x + y in place, element-wise, FP32 add and one rounding to the
 // activation dtype - the same values as transformers' add in either dtype.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 

@@ -9,8 +9,8 @@ namespace strix::kernels {
 
 namespace {
 
-using rope_math::bf16_bits_to_f32;
-using rope_math::f32_to_bf16_bits;
+using kernels::bf16_bits_to_f32;
+using kernels::f32_to_bf16_bits;
 
 constexpr int64_t kMaxW = 1024;  // one thread per channel of a group: one workgroup
 

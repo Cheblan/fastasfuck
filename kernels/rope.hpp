@@ -8,7 +8,7 @@
 // out = x*cos + rotate_half(x)*sin with each product and the sum rounded
 // separately (no FMA); BF16 also rounds cos/sin and each step through BF16.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 

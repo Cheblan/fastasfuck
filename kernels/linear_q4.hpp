@@ -11,7 +11,7 @@
 // (register use); larger M is processed 8 rows per pass - correct, but
 // prefill is not what this kernel is built for.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "runtime/q4_device.hpp"
 #include "runtime/q5_device.hpp"
 

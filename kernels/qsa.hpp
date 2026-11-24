@@ -18,7 +18,7 @@
 // Block-key cache layout: chunk-major - element d of block b at ((d / 8) * cap_blocks + b) * 8 + d % 8 -
 // so the score kernel's lanes (one block each) read one contiguous run per 16-byte load.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "kernels/rope.hpp"  // MropePos
 
 #include "common/hip_runtime.hpp"

@@ -6,7 +6,7 @@
 // min applied in FP32), FP32 accumulation, y rounded once to its dtype - the prefill default (PrefillMath).
 // Tiles of 64 rows of x x 128 rows of W, K in steps of 64 (so K % 64 == 0: every K of the target is).
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "runtime/q4_device.hpp"
 #include "runtime/q5_device.hpp"
 #include "runtime/q6_device.hpp"

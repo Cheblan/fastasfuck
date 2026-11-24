@@ -174,14 +174,6 @@ void check_common(const char *op, const void *x, const float *w, const void *out
 
 }  // namespace
 
-const char *act_name(Act a) {
-    switch (a) {
-        case Act::F32: return "F32";
-        case Act::BF16: return "BF16";
-    }
-    return "?";
-}
-
 void rmsnorm_zc(const void *x, const float *w, void *out, int64_t rows, int64_t d, float eps, Act act,
                 hipStream_t stream) {
     check_common("rmsnorm_zc", x, w, out, rows, d, eps);

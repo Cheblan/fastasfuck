@@ -3,7 +3,7 @@
 // activations, FP32 accumulation. linear_q4's structure (kernels/linear_q4.hpp) at one code per byte: each lane
 // loads 16 codes per 16-byte load (always within one group, G >= 32) and computes s * sum(x*q) + m * sum(x) per
 // chunk; 1-8 waves per output row (split-K), partial sums meet in LDS; M == 1 has its own instantiation.
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "runtime/q8_device.hpp"
 #include "common/hip_runtime.hpp"
 #include <cstdint>

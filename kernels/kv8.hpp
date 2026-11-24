@@ -28,7 +28,7 @@
 //   [cap W, + cap / 32 W words)     K params, group g channel c at g W + c
 //   then V codes [cap][W], then V params [cap][W / 32] words.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 

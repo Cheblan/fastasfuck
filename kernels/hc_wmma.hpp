@@ -12,7 +12,7 @@
 //         h W_up^T, u[t, j] = (1/H) sum_s sigmoid(z_s) * X[t, s d + j] * inv[t, s] * (1 + norm_w[s d + j]).
 // Requires H == 4, d % 64 == 0 (d = 2560), r % 64 == 0 (320).
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "runtime/q4_device.hpp"
 #include "runtime/q8_device.hpp"
 

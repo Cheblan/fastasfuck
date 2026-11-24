@@ -4,7 +4,7 @@
 // loads 32 codes as their low nibbles (16 bytes, Q4's packing) and high bits (8 bytes), always within one group
 // (G >= 32), and computes s * sum(x*q) + m * sum(x) per chunk; 1-8 waves per output row (split-K, ~2048 codes a
 // wave as Q4), partial sums meet in LDS; M == 1 has its own instantiation.
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "runtime/q6_device.hpp"
 #include "common/hip_runtime.hpp"
 #include <cstdint>

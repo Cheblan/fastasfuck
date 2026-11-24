@@ -17,7 +17,7 @@
 // are stored in it, sigma F32, X rounded once per element. State: zeros for a fresh sequence (the reference
 // pads with zeros).
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 
