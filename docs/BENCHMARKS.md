@@ -44,7 +44,7 @@ All benchmark results documented herein were gathered on bare-metal hardware und
 The engine provides `--mtp-vocab-filter` to control the vocabulary coverage of the MTP draft head without affecting the full base model vocabulary:
 - **`--mtp-vocab-filter = all` (Default):** Retains all 248,320 vocabulary tokens in the draft head matrix (357.6 MB in Q4). Guarantees out-of-the-box drafting across all international languages, code, and symbols with steady ~2.11 ms draft latency.
 - **`--mtp-vocab-filter = en+ru` (Localized Optimization):** Prunes tokens outside English and Cyrillic Unicode blocks, retaining 160,904 tokens (64.8% of vocabulary, 231.7 MB matrix). Pruning drops draft latency by 25.6% (from 2.11 ms down to 1.57 ms), yielding a **+4.4% to +4.6% decode throughput speedup across all prompts**.
-- **Bit-Identity Invariant ($H_{all} \equiv H_{en+ru}$):** Because the base model verifier evaluates all draft proposals against the complete, unpruned vocabulary, filtering the draft head changes only speculative acceptance efficiency, never the greedy output sequence ($T = 0$). All 18 task pairs across all three model variants exhibited 100.000% exact SHA-256 bit identity ($H_{all} = H_{en+ru}$).
+- **Bit-Identity Invariant (H_all == H_en_ru):** Because the base model verifier evaluates all draft proposals against the complete, unpruned vocabulary, filtering the draft head changes only speculative acceptance efficiency, never the greedy output sequence (T = 0). All 18 task pairs across all three model variants exhibited 100.000% exact SHA-256 bit identity (H_all == H_en_ru).
 
 | Task | Domain / Subject | Thinking-Cap (`all`) | Thinking-Cap (`en+ru`) | Swift 1.5 (`all`) | Swift 1.5 (`en+ru`) | Qwen Base (`all`) | Qwen Base (`en+ru`) | Bit-Identity Status |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -73,7 +73,7 @@ The engine provides `--mtp-vocab-filter` to control the vocabulary coverage of t
 | **64k Context** | 60,183 tokens | 1,427.9 tok/s | **1,424.9 ± 5.1 tok/s** (n = 3) | 42.22 s |
 | **128k Context** | 126,482 tokens | 1,376.9 tok/s | **1,377.9 ± 1.4 tok/s** (n = 3) | 91.79 s |
 
-*Note on I/O Lookahead:* On prompts ≥ 16k, Cold NVMe and Warm RAM prefill throughput are virtually identical (< 1% delta) because the engine's `set_lookahead` thread asynchronously reads chunk $k+1$ from NVMe into pinned host memory while chunk $k$ executes on the GPU compute units.
+*Note on I/O Lookahead:* On prompts ≥ 16k, Cold NVMe and Warm RAM prefill throughput are virtually identical (< 1% delta) because the engine's `set_lookahead` thread asynchronously reads chunk k+1 from NVMe into pinned host memory while chunk k executes on the GPU compute units.
 
 ---
 
@@ -128,7 +128,9 @@ When an idle GPU receives an isolated prefill request, the arbiter dispatches fu
 
 ### Physics of the Solo Quantum and Chunk Switching
 The maximum possible single-token latency pause during prefill transitions is strictly governed by the physical quantum duration:
-$$\text{Solo Quantum Latency} = \frac{\text{chunk}}{\text{Solo Prefill Throughput}} + \text{Step Overhead}$$
+```text
+Solo Quantum Latency = (chunk / Solo Prefill Throughput) + Step Overhead
+```
 
 - For `chunk = 1024`: 1024 / 1555 ≈ 0.66 s ⟹ Max ITL ≈ 750 ms.
 - For `chunk = 2048`: 2048 / 1668 ≈ 1.23 s ⟹ Max ITL ≈ 1,320 ms.
@@ -168,9 +170,9 @@ Comparative benchmark of quantum slicing configurations on AMD Strix Halo silico
 
 ### Why `chunk-shared = 1024` Wins on MoE Silicon
 1. **MoE Routing Mathematics:** Qwen 3.8-Flash-Next employs 512 fine-grained experts with top-k = 10.
-   - At `chunk-shared = 256`: total token-expert dispatches = 256 × 10 = 2,560. Across 512 experts, an average of only **≈ 5 tokens reach each expert** ($M=5$). GEMM matrix acceleration completely degenerates into a memory-bound bandwidth stall, cutting prefill throughput by **58.5%** and bloating turn makespan from 20s to 56s.
+   - At `chunk-shared = 256`: total token-expert dispatches = 256 × 10 = 2,560. Across 512 experts, an average of only **≈ 5 tokens reach each expert** (M = 5). GEMM matrix acceleration completely degenerates into a memory-bound bandwidth stall, cutting prefill throughput by **58.5%** and bloating turn makespan from 20s to 56s.
    - At `chunk-shared = 512`: ≈ 10 tokens per expert. Prefill drops by 26–33% relative to 1024.
-   - At `chunk-shared = 1024`: ≈ 20 tokens per expert ($M=20$). Compute units are saturated, sustaining **913–1,151 tok/s** concurrent prefill.
+   - At `chunk-shared = 1024`: ≈ 20 tokens per expert (M = 20). Compute units are saturated, sustaining **913–1,151 tok/s** concurrent prefill.
 2. **Deficit Round Robin Fairness:** As demonstrated by the 3D+1P and 2D+2P profiles, the GpuArbiter guarantees that generation slots receive the GPU compute engine every ~740–770 ms, ensuring silky smooth IDE streaming without starving multi-turn coding agents.
 3. **Alternative Profile:** For users prioritizing softer decode step latencies (~500 ms) in interactive single-agent environments, `chunk-shared = 512` is available as a configurable tuning option at the cost of ~25% prefill bandwidth.
 

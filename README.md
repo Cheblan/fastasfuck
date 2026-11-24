@@ -153,6 +153,8 @@ Serve an OpenAI-compatible API on port 5300:
 build/strix/fastasfuck_server --config deploy/fastasfuck-server.conf
 ```
 
+For a comprehensive guide to every configuration parameter, memory sizing, and production recommendations, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 ### 4. Verify & Query
 ```sh
 curl -s localhost:5300/v1/chat/completions -H 'Content-Type: application/json' \
