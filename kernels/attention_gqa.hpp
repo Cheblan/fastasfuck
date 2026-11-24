@@ -88,7 +88,7 @@ void attention(const void *q, const void *gate, const Kv8View &kv, const Attenti
 
 // QSA sparse attention (full attention with the QSA indexer): as attention(), but query t
 // attends only to the tokens of its selected blocks - sel [T, sel_ld] int32 block indices, nsel [T] their counts
-// (kernels/qsa.hpp qsa_topk's output; each block b is tokens 4b..4b+3) - plus its (pos + 1) % 4 tail tokens: at
+// (kernels/qsa_indexer.hpp qsa_topk's output; each block b is tokens 4b..4b+3) - plus its (pos + 1) % 4 tail tokens: at
 // most 4 sel_ld + 3 keys. With every complete block selected this is exactly attention(). sel/nsel are device data:
 // a block id outside the query's complete blocks, or a count above them, sets err ([3] uint32, zeroed; err[1] = the
 // token, err[2] = the value; check_attention_error throws) and is clamped, so nothing outside the cache is read.

@@ -1,7 +1,7 @@
 #pragma once
 
 // Device-side RoPE arithmetic shared by kernels/rope.hip and the fused
-// q/k norm + RoPE in kernels/attention.hip, so both rotate identically
+// q/k norm + RoPE in kernels/attention_gqa.hip, so both rotate identically
 // (transformers' arithmetic: kernels/rope.hpp).
 
 #include "common/hip_runtime.hpp"

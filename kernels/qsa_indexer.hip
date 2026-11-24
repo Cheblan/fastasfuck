@@ -1,4 +1,4 @@
-#include "kernels/qsa.hpp"
+#include "kernels/qsa_indexer.hpp"
 
 #include "common/hip_check.hpp"
 #include "kernels/rope_math.hpp"
