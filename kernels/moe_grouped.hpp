@@ -15,7 +15,7 @@
 // its token's row - are NaN, never an out-of-bounds read. MoeMath::WmmaBf16 needs K % 64 == 0 (the target's K
 // are 2560 and 640).
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "runtime/q4_device.hpp"
 #include "runtime/q5_device.hpp"
 

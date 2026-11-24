@@ -8,7 +8,7 @@
 // correctness baseline and the path for tensors that stay BF16. The tuned
 // hot path will be the 4-bit kernel.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 

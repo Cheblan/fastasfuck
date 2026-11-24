@@ -18,7 +18,7 @@
 // per-stream partial dots that need only X: a = sum_s inv_s * (W'_s . X_s),
 // with inv_s = 1/sqrt(mean(X_s^2) + eps) accumulated from the same X loads.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "runtime/q4_device.hpp"
 #include "runtime/q8_device.hpp"
 

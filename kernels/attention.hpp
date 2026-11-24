@@ -20,7 +20,7 @@
 // KV cache: [capacity, Hk, D] per layer for K and V, activation dtype.
 
 #include "kernels/kv8.hpp"   // Kv8View
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "kernels/rope.hpp"  // MropePos (interleaved mRoPE triples)
 
 #include "common/hip_runtime.hpp"

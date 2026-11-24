@@ -22,7 +22,7 @@
 // the first one wins. check_router_error() turns it into an exception (it
 // synchronizes). Downstream, the experts kernels also flag id -1.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 

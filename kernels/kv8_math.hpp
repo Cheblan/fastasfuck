@@ -4,7 +4,7 @@
 // attention kernels' readers (kernels/attention.hip), so every reader dequantizes identically.
 
 #include "kernels/kv8.hpp"
-#include "kernels/rope_math.hpp"  // BF16 rounding
+#include "kernels/math_utils.hpp"
 
 #include "common/hip_runtime.hpp"
 
@@ -12,8 +12,8 @@
 
 namespace strix::kernels::kv8_math {
 
-__device__ inline float h2f(uint32_t bits16) { return (float)__builtin_bit_cast(_Float16, (uint16_t)bits16); }
-__device__ inline uint16_t f2h(float f) { return __builtin_bit_cast(uint16_t, (_Float16)f); }  // RNE
+using strix::kernels::h2f;
+using strix::kernels::f2h;
 
 // The (scale, zero) word of a range [lo, hi] of finite values; ok = false if a parameter overflows fp16.
 __device__ inline uint32_t params(float lo, float hi, bool &ok) {

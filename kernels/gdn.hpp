@@ -32,7 +32,7 @@
 // are FP32 on the device (A_log is FP32 in the checkpoint; the others are
 // BF16 values, exact in FP32).
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 

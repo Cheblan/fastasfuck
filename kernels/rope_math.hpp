@@ -5,19 +5,15 @@
 // (transformers' arithmetic: kernels/rope.hpp).
 
 #include "common/hip_runtime.hpp"
+#include "kernels/math_utils.hpp"
 
 #include <cstdint>
 
 namespace strix::kernels::rope_math {
 
-__device__ inline float bf16_bits_to_f32(uint16_t b) { return __uint_as_float((uint32_t)b << 16); }
-__device__ inline uint16_t f32_to_bf16_bits(float f) {
-    uint32_t u = __float_as_uint(f);
-    if ((u & 0x7f800000u) == 0x7f800000u) return (uint16_t)((u >> 16) | ((u & 0x007fffffu) ? 0x0040u : 0u));
-    u += 0x7fffu + ((u >> 16) & 1u);
-    return (uint16_t)(u >> 16);
-}
-__device__ inline float rb(float v) { return bf16_bits_to_f32(f32_to_bf16_bits(v)); }
+using strix::kernels::bf16_bits_to_f32;
+using strix::kernels::f32_to_bf16_bits;
+using strix::kernels::rb;
 
 // cos/sin of fp32(pos * inv_freq), each times scale in FP32 (YaRN's attention factor - transformers multiplies its
 // cos/sin tables by it before the cast; 1 for plain RoPE, which leaves every value bit-identical), then rounded to

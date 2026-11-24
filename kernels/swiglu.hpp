@@ -9,7 +9,7 @@
 // [M, A, 2I] output is M*A such rows). Math is FP32; BF16 rounds where the
 // reference does: h = bf16(bf16(silu(gate)) * up).
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 

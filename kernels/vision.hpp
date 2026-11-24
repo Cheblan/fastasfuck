@@ -6,7 +6,7 @@
 // FP32, one rounding where the output is stored. Tower weights are BF16 in vision.faf; the norm
 // gains/biases reach these kernels widened to FP32 by the loader (the engine's convention).
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 
 #include "common/hip_runtime.hpp"
 

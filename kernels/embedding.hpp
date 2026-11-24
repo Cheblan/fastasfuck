@@ -10,7 +10,7 @@
 // pass it to check_embedding_error() at its next sync point, which throws
 // naming both.
 
-#include "kernels/norm.hpp"  // Act
+#include "kernels/types.hpp"
 #include "runtime/q8_device.hpp"
 
 #include "common/hip_runtime.hpp"
