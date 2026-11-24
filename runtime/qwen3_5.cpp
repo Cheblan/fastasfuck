@@ -1,7 +1,7 @@
 #include "runtime/qwen3_5.hpp"
 
 #include "common/hip_check.hpp"
-#include "kernels/attention.hpp"
+#include "kernels/attention_gqa.hpp"
 #include "kernels/gdn.hpp"
 #include "kernels/linear.hpp"
 #include "kernels/residual.hpp"

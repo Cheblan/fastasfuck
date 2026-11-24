@@ -16,7 +16,7 @@
 //
 // QSA: while every query of a call sees at most dense_key_limit() keys the indexer would keep them all, so dense
 // attention is exact; past that the indexer scores the cached block keys, keeps the top budget / 4 blocks per
-// query (plus its tail tokens) and attention runs over that gathered set (kernels/attention.hpp
+// query (plus its tail tokens) and attention runs over that gathered set (kernels/attention_gqa.hpp
 // attention_gathered). Prefill (>= kWmmaMinTokens / kGroupedMinTokens tokens) runs the WMMA / grouped kernels.
 //
 // Qwen4ExpSession is one conversation: KV cache + indexer block keys per attention layer, conv + recurrent
@@ -25,7 +25,7 @@
 #include "kernels/embedding.hpp"
 #include "kernels/logits_topk.hpp"
 #include "kernels/logits_bias.hpp"
-#include "kernels/attention.hpp"  // AttnPrecision
+#include "kernels/attention_gqa.hpp"  // AttnPrecision
 #include "kernels/gdn.hpp"        // DrPrecision
 #include "kernels/norm.hpp"  // Act
 #include "kernels/mtp_pick.hpp"
@@ -749,7 +749,7 @@ public:
     // 131.3 vs 97.4 - so 12.
     static constexpr int64_t kWmmaMinTokens = 12;
     // With PrefillMath::WmmaBf16 and BF16 activations, the trunk's full-attention layers run on the matrix units
-    // (kernels/attention.hpp attention_wmma: a token's query heads as one 16-row tile) from this many rows - every
+    // (kernels/attention_gqa.hpp attention_wmma: a token's query heads as one 16-row tile) from this many rows - every
     // forward, decode and MTP verify included. Per row the vector kernel's 12 waves each re-read the K / V tile from
     // LDS and the kernel waits on LDS; the matrix units read it once a tile. Per call (2048 gathered keys, Hq 24):
     // vector vs WMMA, BF16 K/V, T = 1 46.8 vs 32.7 us, 4 111.0 vs 29.6, 8 201.2 vs 48.0; 8-bit K/V 46.0 vs 26.6,

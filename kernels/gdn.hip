@@ -469,7 +469,7 @@ __device__ inline float wg_tiles_max(const wmma_f32x8 *t, int n) {
     return wg_wave_max(m);
 }
 
-// A workgroup barrier that orders LDS only (as attention.hip's lds_barrier): __syncthreads' workgroup fence also
+// A workgroup barrier that orders LDS only (as attention_gqa.hip's lds_barrier): __syncthreads' workgroup fence also
 // waits for every global load in flight (s_waitcnt vmcnt(0) - a workgroup spans two CUs' L0 caches in WGP mode), so
 // with 5-6 barriers a chunk a load issued ahead was drained at the next barrier. The waves share only LDS.
 __device__ __forceinline__ void wg_lds_barrier() {

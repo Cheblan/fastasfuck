@@ -2,7 +2,7 @@
 
 // qwen4_exp QSA indexer on the GPU: which
 // keys each query of a full-attention layer attends to. The indexer's queries come from the merged
-// q|k|v|indexer projection through qk_norm_rope (kernels/attention.hpp: per-head RMSNorm_zc + partial RoPE,
+// q|k|v|indexer projection through qk_norm_rope (kernels/attention_gqa.hpp: per-head RMSNorm_zc + partial RoPE,
 // any head dim); these kernels do the rest:
 //
 //   qsa_block_keys: when a 4-token block completes, its key K_b = RoPE(RMSNorm_zc(mean of its 4 raw keys))

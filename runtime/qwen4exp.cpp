@@ -8,7 +8,7 @@
 #include "common/hip_check.hpp"
 #include "common/log.hpp"
 #include "common/trace.hpp"
-#include "kernels/attention.hpp"
+#include "kernels/attention_gqa.hpp"
 #include "kernels/gdn.hpp"
 #include "kernels/hc.hpp"
 #include "kernels/hc_wmma.hpp"
@@ -17,7 +17,7 @@
 #include "kernels/moe_router.hpp"
 #include "kernels/mtp_pick.hpp"
 #include "kernels/ple.hpp"
-#include "kernels/qsa.hpp"
+#include "kernels/qsa_indexer.hpp"
 #include "kernels/vision.hpp"
 #include "kernels/residual.hpp"
 #include "kernels/rope.hpp"
@@ -1787,7 +1787,7 @@ size_t Qwen4ExpSession::state_bytes(int64_t n, int64_t from) const {
 
 namespace {
 // Copies between one device region and the next `bytes` of a host cursor, in either direction.
-// The block keys of blocks [b0, b1): the cache is chunk-major (kernels/qsa.hpp: element d of block b at
+// The block keys of blocks [b0, b1): the cache is chunk-major (kernels/qsa_indexer.hpp: element d of block b at
 // ((d / 8) * cap_blocks + b) * 8 + d % 8), so they're D / 8 strided rows of (b1 - b0) * 8 elements - packed on the
 // host as [chunk][block][8], which doesn't depend on the session's capacity.
 void block_keys_copy(uint8_t *&cur, const void *dev, int64_t b0, int64_t b1, int64_t cap_blocks, int64_t D, size_t e,
@@ -2971,7 +2971,7 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
                 // One launch per run: q normed + roped in place, k into the K cache, v copied into the V
                 // cache, past the dense limit the indexer queries (normed + roped in place), and in a verify
                 // the raw indexer keys copied into the layer's verify_in (keep_verify_prefix may replay
-                // them) - kernels/attention.hpp qk_norm_rope_jobs.
+                // them) - kernels/attention_gqa.hpp qk_norm_rope_jobs.
                 const bool qsa_layer = r.p + r.Tr > D.dense_key_limit();
                 kernels::NormRopeJob nr[5] = {
                     {at(proj_, r.base * D.astride), D.astride, 2 * hd, at(proj_, r.base * D.astride), D.astride,
@@ -3015,7 +3015,7 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
                            r.p};
                 }
                 uint8_t *q_r = at(proj_, r.base * D.astride), *core_r = core_.get() + (size_t)(r.base * D.hq * hd) * e;
-                // BF16 activations: the attention on the matrix units (kernels/attention.hpp, kWmmaAttnMinTokens),
+                // BF16 activations: the attention on the matrix units (kernels/attention_gqa.hpp, kWmmaAttnMinTokens),
                 // chosen per run by its own rows; a run reads its queries / writes its outputs at its row base
                 // (forward_qwen4exp_batch_vs_solo: bit-identical to that run alone).
                 const bool wmma_attn = wmma && act == Act::BF16 && r.Tr >= kWmmaAttnMinTokens;
@@ -4071,7 +4071,7 @@ void Qwen4ExpSession::run_mtp(int seq, int32_t token_id, int64_t step) {
     const kernels::AttentionShape as{T, p, D.hq, D.hkv, hd, D.astride, 2 * hd};
     const float scale = 1.0f / std::sqrt((float)hd);
     // The head's own layer, as a trunk full-attention layer: the same dispatch, including the matrix-unit
-    // attention from one row (kWmmaAttnMinTokens; the trunk's switch, kernels/attention.hpp). The head's K / V
+    // attention from one row (kWmmaAttnMinTokens; the trunk's switch, kernels/attention_gqa.hpp). The head's K / V
     // stay BF16 (the 8-bit head cache is the kv-cache-8bit follow-up). Summation order changes -> draft ids and
     // acceptance move - measured as such (docs "MTP head attention on the matrix units").
     const bool wmma_attn = prefill_math_ == PrefillMath::WmmaBf16 && act == Act::BF16 && T >= kWmmaAttnMinTokens;

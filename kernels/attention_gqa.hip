@@ -1,4 +1,4 @@
-#include "kernels/attention.hpp"
+#include "kernels/attention_gqa.hpp"
 
 #include "common/hip_check.hpp"
 #include "kernels/kv8_math.hpp"
@@ -20,7 +20,7 @@ using rope_math::f32_to_bf16_bits;
 constexpr int kNormThreads = 256;
 constexpr int kD = 256;       // head dim the attention kernel is built for
 constexpr int kTile = 16;     // keys staged in LDS per step
-constexpr int64_t kQsaTokens = 4;  // tokens per QSA indexer block (kernels/qsa.hpp kQsaBlock)
+constexpr int64_t kQsaTokens = 4;  // tokens per QSA indexer block (kernels/qsa_indexer.hpp kQsaBlock)
 constexpr int kMaxGroup = 16; // query heads per KV head (one wave each; q for all of them in LDS)
 constexpr int64_t kMaxPos = 1ll << 24;
 

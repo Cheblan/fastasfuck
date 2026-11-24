@@ -57,8 +57,8 @@ void rope(void *x, int64_t T, int64_t heads, int64_t token_stride, int64_t head_
 // exactly in that case, so the text path pays nothing.
 //
 // A pos3 array is a device int64 [rows][3] of section positions, row-major, for a contiguous run of sequence
-// indices starting at a documented base; the consuming kernels (kernels/attention.hpp qk_norm_rope_jobs,
-// kernels/qsa.hpp qsa_block_keys) reject nulls, misaligned pointers and rows past kMaxPos.
+// indices starting at a documented base; the consuming kernels (kernels/attention_gqa.hpp qk_norm_rope_jobs,
+// kernels/qsa_indexer.hpp qsa_block_keys) reject nulls, misaligned pointers and rows past kMaxPos.
 struct MropePos {
     const int64_t *pos3 = nullptr;  // device [rows, 3]; null = scalar pos0 + t (text-only, today's kernel)
     int64_t rows = 0;               // rows the array covers (checked against the call's needs)

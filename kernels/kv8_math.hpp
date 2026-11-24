@@ -1,7 +1,7 @@
 #pragma once
 
 // Device-side 8-bit K/V arithmetic (kernels/kv8.hpp has the format), shared by kernels/kv8.hip (quantize) and the
-// attention kernels' readers (kernels/attention.hip), so every reader dequantizes identically.
+// attention kernels' readers (kernels/attention_gqa.hip), so every reader dequantizes identically.
 
 #include "kernels/kv8.hpp"
 #include "kernels/math_utils.hpp"
