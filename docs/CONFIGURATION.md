@@ -38,120 +38,130 @@ The engine **never silently ignores unknown or invalid configuration options**. 
 
 ### 2.1 Model Files & Binary Formats
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `weights` | `PATH` | `/models/weights.faf` | Absolute path to quantized base model weights in `.faf` binary format (FastAsFuck unified tensor layout). |
-| `ngram` | `PATH` | `/models/ngram.table` | Absolute path to the prefix n-gram lookup table (int8 rows) powering the Prefix Lookahead Engine (PLE). |
-| `tokenizer` | `PATH` | `/models/tokenizer.json` | Absolute path to the HuggingFace `tokenizer.json` vocabulary file. |
-| `generation-config` | `PATH` | `/models/generation_config.json` | Path to default sampling parameters (`temperature`, `top_p`, `top_k`, repetition penalties). |
-| `vision` | `on\|off` | `on` | Enables multimodal vision encoder (`vision.faf` loaded from weights directory; accepts `data:` URL images). When `off`, image parts return HTTP 400 and vision kernels are not loaded. |
-| `vision-preprocess-limit` | `Int [1, 16]` | `2` | Maximum concurrent images processed (decode, resize, patch tensor pack) across request threads. Protects against host RAM memory spikes. Requests exceeding the limit receive a retryable HTTP 503. |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `weights` | `Path` | Valid file path | `/models/weights.faf` | Absolute path to quantized base model weights in `.faf` binary format (FastAsFuck unified tensor layout). |
+| `ngram` | `Path` | Valid file path | `/models/ngram.table` | Absolute path to the prefix n-gram lookup table (int8 rows) powering the Prefix Lookahead Engine (PLE). |
+| `tokenizer` | `Path` | Valid file path | `/models/tokenizer.json` | Absolute path to the HuggingFace `tokenizer.json` vocabulary file. |
+| `generation-config` | `Path` | Valid file path | `/models/generation_config.json` | Path to default sampling parameters (`temperature`, `top_p`, `top_k`, repetition penalties). |
+| `vision` | `OnOff` | `on`, `off` | `on` | Enables multimodal vision encoder (`vision.faf` loaded from weights directory; accepts `data:` URL images). When `off`, image parts return HTTP 400 and vision kernels are not loaded. |
+| `vision-preprocess-limit` | `Int` | `1` to `16` | `2` | Maximum concurrent images processed (decode, resize, patch tensor pack) across request threads. Protects against host RAM memory spikes. Requests exceeding the limit receive a retryable HTTP 503. |
 
 ---
 
 ### 2.2 Network & HTTP Server
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `host` | `TEXT` | `0.0.0.0` | Network interface address to bind and listen for incoming HTTP connections. |
-| `port` | `Int [1, 65535]` | `5300` | TCP port for HTTP/REST and WebSocket endpoints. |
-| `model-id` | `TEXT` | `qwen3.8-flash-next` | Model identifier string reported by `/v1/models` and completion responses. |
-| `model-aliases` | `TEXT\|off` | `off` | Comma-separated list of model aliases for client compatibility (e.g. `gpt-4o,qwen-turbo`). |
-| `api-key` | `TEXT\|off` | `off` | Optional Bearer API key required for client requests. `off` disables authentication. |
-| `request-read-timeout-s` | `Int [1, 3600]` | `30` | Maximum socket idle time (seconds) while request body is streaming before aborting with HTTP 408. |
-| `log-level` | `TEXT` | `info` | Logging verbosity: `error`, `warn`, `info` (per-request summary and startup), or `debug` (full MTP/PLE/cache row traces). |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `host` | `Text` | IP address or hostname | `0.0.0.0` | Network interface address to bind and listen for incoming HTTP connections. |
+| `port` | `Int` | `1` to `65535` | `5300` | TCP port for HTTP/REST and WebSocket endpoints. |
+| `model-id` | `Text` | Any non-empty string | `qwen3.8-flash-next` | Model identifier string reported by `/v1/models` and completion responses. |
+| `model-aliases` | `TextOrOff` | Comma-separated strings, `off` | `off` | Additional model aliases for `/v1/models` to ensure client compatibility (e.g. `gpt-4o,qwen-turbo`). |
+| `api-key` | `TextOrOff` | Secret token string, `off` | `off` | Optional Bearer API key required for client requests. `off` disables authentication. |
+| `request-read-timeout-s` | `Int` | `1` to `3600` | `30` | Maximum socket idle time (seconds) while request body is streaming before aborting with HTTP 408. |
+| `log-level` | `Text` | `error`, `warn`, `info`, `debug` | `info` | Logging verbosity: `error`, `warn`, `info` (per-request summary and startup), or `debug` (full MTP/PLE/cache row traces). |
 
 ---
 
 ### 2.3 Slot Memory & Unified Memory Architecture (UMA)
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `total-slots` | `Int [1, 8]` | `4` | Number of concurrent agent sessions served simultaneously with complete hardware state isolation. |
-| `capacity`<br>*(alias: `slot-capacity`)* | `Int [4096, 1048576]` | `262144` | Context capacity per slot in tokens (256K tokens per active slot). |
-| `total-capacity` | `Int [0, 16777216]` | `1048576` | Global physical capacity ceiling across all slots (4 slots x 262,144 = 1,048,576 tokens). |
-| `kv-precommit` | `on\|off` | `on` | **Critical for Strix Halo.** Statically pre-commits 100% of flat KV-cache pages into physical DRAM at startup. Eliminates virtual memory overcommit, runtime allocator locks, and ROCm SVM page faults. |
-| `kv-cache` | `TEXT` | `q8` | KV cache quantization format: `q8` (saves 50% DRAM vs FP16 with negligible perplexity difference), `fp16`, or `bf16`. |
-| `rope-yarn-factor` | `Number [1, 8]` | `1` | Context extension multiplier using YaRN: positions = 262,144 x factor. `1` uses trained RoPE without scaling. |
-| `placement` | `TEXT` | `device` | Weight physical residency: `device` (unified GPU DRAM) or `host-experts` (MoE stacks pinned in host RAM for undersized GPUs; slow, development only). |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `total-slots` | `Int` | `1` to `8` | `4` | Number of concurrent agent sessions served simultaneously with complete hardware state isolation. |
+| `capacity`<br>*(alias: `slot-capacity`)* | `Int` | `4096` to `1048576` | `262144` | Context capacity per slot in tokens (256K tokens per active slot). |
+| `total-capacity` | `Int` | `0` to `16777216` | `1048576` | Global physical capacity ceiling across all slots (4 slots x 262,144 = 1,048,576 tokens). `0` = unconstrained by a global ceiling. |
+| `kv-precommit` | `OnOff` | `on`, `off` | `on` | **Critical for Strix Halo.** Statically pre-commits 100% of flat KV-cache pages into physical DRAM at startup. Eliminates virtual memory overcommit, runtime allocator locks, and ROCm SVM page faults. |
+| `kv-cache` | `Text` | `q8`, `bf16` | `q8` | KV cache quantization format: `q8` (saves 50% DRAM vs BF16 with negligible perplexity difference) or `bf16`. |
+| `rope-yarn-factor` | `Number` | `1.0` to `8.0` | `1` | Context extension multiplier using YaRN: positions = 262,144 x factor. `1` uses trained RoPE without scaling. |
+| `placement` | `Text` | `device`, `host-experts` | `device` | Weight physical residency: `device` (unified GPU DRAM) or `host-experts` (MoE stacks pinned in host RAM for undersized GPUs; slow, development only). |
 
 ---
 
 ### 2.4 Prefill Scheduling & Interleaving (Pareto Frontier)
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `chunk` | `Int [1, 16384]` | `4096` | Solo prefill quantum in tokens. Matches the RDNA 3.5 compute saturation knee (40 CUs / 20 WGPs), maximizing GEMM bandwidth. |
-| `chunk-shared` | `Int [0, 16384]` | `1024` | Prefill quantum used when another slot is actively decoding. Prevents inter-token latency (ITL) freezes on active agent turns while maintaining high MoE expert saturation. |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `chunk` | `Int` | `1` to `16384` | `4096` | Solo prefill quantum in tokens. Matches the RDNA 3.5 compute saturation knee (40 CUs / 20 WGPs), maximizing GEMM bandwidth. |
+| `chunk-shared` | `Int` | `0` to `16384` | `1024` | Prefill quantum used when another slot is actively decoding. Prevents inter-token latency (ITL) freezes on active agent turns while maintaining high MoE expert saturation. `0` = always full chunk. |
 
 ---
 
 ### 2.5 Compute Precision
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `gdn-precision` | `TEXT` | `half-u` | Precision for GDN linear attention gates: `half-u` (FP16 inputs with FP32 accumulator via WMMA), `half`, `fast`, or `exact`. |
-| `attention-precision` | `TEXT` | `fast` | Precision for QSA windowed attention softmax and dot-product kernels: `fast` or `exact`. |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `gdn-precision` | `Text` | `half-u`, `half`, `fast`, `exact` | `half-u` | Precision for GDN linear attention recurrent gates: `half-u` (FP16 inputs with FP32 accumulator via WMMA, U-path products as F16 hi + lo), `half` (one F16 product), `fast` (one BF16 product), or `exact` (BF16 hi + lo products). |
+| `attention-precision` | `Text` | `fast`, `exact` | `fast` | Precision for QSA windowed attention softmax and dot-product kernels: `fast` (P as one BF16 term, faster execution) or `exact` (P as BF16 hi + lo products). |
 
 ---
 
 ### 2.6 Multi-Token Prediction (MTP) Speculative Drafting
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `mtp` | `on\|off` | `on` | Enables hardware speculative decoding via the decoupled MTP head. |
-| `mtp-draft` | `Int [1, 16]` | `7` | Maximum speculative chain length per verification pass (up to 7 candidate tokens). |
-| `mtp-margin` | `Number [0, 100]` | `1.5` | Base logit margin between top-1 and top-2 candidates under greedy decoding (T = 0). Candidate is drafted only if logit_1 - logit_2 >= margin. |
-| `mtp-escalating-margin` | `on\|off` | `on` | Increases margin threshold with each successive step in the draft chain to suppress tail hallucinations. |
-| `mtp-margin-slope` | `Number [0, 1]` | `0.08` | Margin increase per draft step: margin_k = margin_0 + k * slope. |
-| `mtp-gate-rule` | `TEXT` | `margin` | Gating rule for greedy decoding (T = 0): `margin` (deterministic exactness) or `cost`. |
-| `sampled-gate` | `TEXT` | `cost` | Gating rule for stochastic sampling (T > 0): `cost` (evaluates expected time speedup using empirical verify latency tables) or `margin`. |
-| `mtp-vocab` | `Int [0, 2^30]` | `0` | Restricts draft head scoring to token range [0, N). `0` scores over the full vocabulary. |
-| `mtp-vocab-filter` | `TEXT` | `all` | Prunes draft head matrix rows by Unicode script. Presets: `all`, `en+ru`, `en`, `no-cjk`, or comma-separated sections (`core,latin,cyrillic,digits,punct,code`). |
-| `draft-head-q4` | `on\|off` | `on` | Quantizes draft head LM rows to Q4 at startup. Reduces draft step latency from 2.11 ms to 1.57 ms while keeping the base verifier in full precision. |
-| `mtp-calib` | `on\|off` | `on` | Executes automated hardware latency calibration on physical GPU silicon at server startup. |
-| `mtp-calib-cache` | `on\|off` | `on` | Persists calibrated profile to `mtp_calib_cache.json` alongside model weights for instant subsequent launches. |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `mtp` | `OnOff` | `on`, `off` | `on` | Enables hardware speculative decoding via the decoupled MTP draft head. |
+| `mtp-draft` | `Int` | `1` to `16` | `7` | Maximum speculative chain length per verification pass (up to 7 candidate tokens). |
+| `mtp-margin` | `Number` | `0.0` to `100.0` | `1.5` | Base logit margin between top-1 and top-2 candidates under greedy decoding (T = 0). Candidate is drafted only if logit_1 - logit_2 >= margin. |
+| `mtp-escalating-margin` | `OnOff` | `on`, `off` | `on` | Increases margin threshold with each successive step in the draft chain to suppress tail hallucinations. |
+| `mtp-margin-slope` | `Number` | `0.0` to `1.0` | `0.08` | Margin increase per draft step: margin_k = margin_0 + k * slope. |
+| `mtp-gate-rule` | `Text` | `margin`, `cost` | `margin` | Gating rule for greedy decoding (T = 0): `margin` (deterministic exactness) or `cost`. |
+| `sampled-gate` | `Text` | `cost`, `margin` | `cost` | Gating rule for stochastic sampling (T > 0): `cost` (evaluates expected time speedup using empirical verify latency tables) or `margin`. |
+| `mtp-vocab` | `Int` | `0` to `1073741824` | `0` | Restricts draft head scoring to token range [0, N). `0` scores over the full vocabulary. |
+| `mtp-vocab-filter` | `Text` | `all`, `en+ru`, `en`, `no-cjk`, or section list | `all` | Prunes draft head matrix rows by Unicode script. Presets: `all` (or `full`), `en+ru` (or `ru+en`), `en` (or `coding`), `no-cjk` (or `western`), or comma-separated sections (`core,latin,cyrillic,greek,digits,punct,code,cjk,arabic,asian,other`) where `core` is mandatory. |
+| `draft-head-q4` | `OnOff` | `on`, `off` | `on` | Quantizes draft head LM rows to Q4 at startup. Reduces draft step latency from 2.11 ms to 1.57 ms while keeping the base verifier in full precision. |
+| `mtp-calib` | `OnOff` | `on`, `off` | `on` | Executes automated hardware latency calibration on physical GPU silicon at server startup. |
+| `mtp-calib-cache` | `OnOff` | `on`, `off` | `on` | Persists calibrated profile to `mtp_calib_cache.json` alongside model weights for instant subsequent launches. |
+| `mtp-calib-cache-file` | `PathOrOff` | Valid file path, `off` | `off` | Explicit path to calibration JSON file (`off` = automatic based on model directory). |
+| `mtp-calib-draft-samples` | `Int` | `10` to `5000` | `300` | Number of timing samples for draft head latency calibration. |
+| `mtp-calib-verify-samples` | `Int` | `10` to `500` | `50` | Number of timing samples for verify pass latency calibration. |
+| `mtp-calib-warmup` | `Int` | `0` to `100` | `15` | Warmup iterations discarded before timing measurement. |
+| `mtp-calib-tolerance-ms` | `Number` | `0.001` to `10.0` | `0.08` | Latency convergence tolerance in ms for early stopping. |
+| `mtp-calib-triplets` | `Int` | `50` to `10000` | `1000` | Number of draft/verify triplets used for logistic regression. |
+| `mtp-lut-step-penalty` | `Number` | `0.0` to `1.0` | `0.015` | MTP cost-gating empirical LUT step penalty deduction. |
+| `mtp-ema-decay` | `Number` | `0.01` to `1.0` | `0.15` | MTP cost-gating Renewal-Reward exponential moving average (EMA) smoothing factor. |
 
 ---
 
 ### 2.7 Prefix Lookahead Engine (PLE)
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `ngram-cache-rows` | `Int [0, 2^26]` | `8388608` | Capacity of hot n-gram table LRU row cache in host RAM (8,388,608 rows ≈ 1.5 GiB RAM). Enables instant RAM-tier lookahead without NVMe disk latency. |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `ngram-cache-rows` | `Int` | `0` to `67108864` | `8388608` | Capacity of hot n-gram table LRU row cache in host RAM (8,388,608 rows ≈ 1.5 GiB RAM). Enables instant RAM-tier lookahead without NVMe disk latency. `0` disables row caching. |
 
 ---
 
 ### 2.8 Persistent Multi-Tier Prompt Cache
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `prompt-cache` | `on\|off` | `on` | Multi-tier prompt cache (RAM + NVMe). Eliminates redundant prefill for shared system instructions and prior multi-turn dialog context. |
-| `prompt-cache-dir` | `PATH` | `/models/prompt-cache` | Directory path on NVMe storage for persistent session state snapshots. |
-| `prompt-cache-gib` | `Int [0, 4096]` | `128` | Maximum disk storage allocation for cached prompt states. |
-| `prompt-cache-ram-margin-gib`| `Int [0, 64]` | `4` | Host RAM safety floor; when free RAM drops below this margin, idle snapshots are flushed from RAM to NVMe. |
-| `low-memory` | `TEXT` | `adapt` | Memory governor behavior: `adapt` (smoothly evicts RAM tier caches under pressure) or `off`. |
-| `prompt-cache-idle-s` | `Int [1, 86400]` | `120` | Session idle timeout before parking inactive slot states to NVMe. |
-| `prompt-cache-checkpoints` | `Int [1, 64]` | `16` | Maximum full session checkpoints retained per conversation. |
-| `prompt-cache-points` | `Int [1, 128]` | `32` | Maximum incremental delta resume points preserved. |
-| `prompt-cache-delta-max-tokens` | `Int [1024, 1048576]` | `65536` | Token delta ceiling before forcing a fresh full checkpoint snapshot. |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `prompt-cache` | `OnOff` | `on`, `off` | `on` | Multi-tier prompt cache (RAM + NVMe). Eliminates redundant prefill for shared system instructions and prior multi-turn dialog context. |
+| `prompt-cache-dir` | `Path` | Valid directory path | `/models/prompt-cache` | Directory path on NVMe storage for persistent session state snapshots. |
+| `prompt-cache-gib` | `Int` | `0` to `4096` | `128` | Maximum disk storage allocation (in GiB) for cached prompt states. |
+| `prompt-cache-ram-margin-gib`| `Int` | `0` to `64` | `4` | Host RAM safety floor (in GiB); when free RAM drops below this margin, idle snapshots are flushed from RAM to NVMe. |
+| `low-memory` | `Text` | `adapt`, `fail` | `adapt` | Memory governor behavior: `adapt` (smoothly evicts RAM tier caches under pressure) or `fail` (refuses startup if RAM floor is violated). |
+| `prompt-cache-idle-s` | `Int` | `1` to `86400` | `120` | Session idle timeout (seconds) before parking inactive slot states to NVMe. |
+| `prompt-cache-write-gib-per-hour` | `Int` | `1` to `1024` | `48` | Maximum disk write bandwidth throttle (GiB/hour) to protect NVMe endurance. |
+| `prompt-cache-disk-free-gib` | `Int` | `1` to `1024` | `32` | Minimum free disk space floor required before pausing snapshot persistence. |
+| `prompt-cache-checkpoints` | `Int` | `1` to `64` | `16` | Maximum full session checkpoints retained per conversation. |
+| `prompt-cache-points` | `Int` | `1` to `128` | `32` | Maximum incremental delta resume points preserved. |
+| `prompt-cache-delta-max-tokens` | `Int` | `1024` to `1048576` | `65536` | Token delta ceiling before forcing a fresh full checkpoint snapshot. |
 
 ---
 
 ### 2.9 Reasoning & Tool-Calling Guards (Thinking Engine)
 
-| Key | Type | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `thinking` | `on\|off` | `on` | Enables reasoning output blocks (`<think>...</think>`) for requests that do not specify thinking parameters. |
-| `thinking-cap` | `Int [0, 1048576]` | `0` | Upper bound on generated thinking tokens (0 = unconstrained). Forces reasoning termination and triggers answer generation. |
-| `thinking-cap-grace` | `Int [0, 65536]` | `256` | Token grace period past `thinking-cap` allowing the model to finish its active sentence before closing the block. |
-| `think-nudge` | `on\|off` | `on` | Loop detection heuristic. Detects repetitive reasoning patterns and nudges the model to commit to a decision. |
-| `think-nudge-rate` | `Number [0.01, 1]` | `0.25` | Repetition threshold: triggers when 25% of the last 1024 thinking tokens repeat earlier 8-grams. |
-| `think-nudge-min-tokens` | `Int [1024, 2^24]` | `3072` | Minimum thinking tokens generated before cycle detection activates. |
-| `think-nudge-wording` | `TEXT` | `commit` | Guidance prompt wording: `commit` (*"... commit to the most promising approach now"*) or `decide`. |
-| `think-end-guard` | `on\|off` | `on` | Prevents turn finalization if `<think>` or `<tool_call>` blocks remain open. |
-| `think-close-on-call` | `on\|off` | `on` | Automatically injects `</think>` before an opened `<tool_call>` if the model initiates a call inside reasoning. |
-| `literal-tags` | `on\|off` | `on` | Treats tag strings as literal text unless immediately preceded by a newline (guards against hallucinated formatting tags). |
+| Key | Type | Options | Default | Description |
+| :--- | :---: | :---: | :---: | :--- |
+| `thinking` | `OnOff` | `on`, `off` | `on` | Enables reasoning output blocks (`<think>...</think>`) for requests that do not specify thinking parameters. |
+| `thinking-cap` | `Int` | `0` to `1048576` | `0` | Upper bound on generated thinking tokens (`0` = unconstrained). Forces reasoning termination and triggers answer generation. |
+| `thinking-cap-grace` | `Int` | `0` to `65536` | `256` | Token grace period past `thinking-cap` allowing the model to finish its active sentence before closing the block. `0` = hard stop at the cap. |
+| `think-nudge` | `OnOff` | `on`, `off` | `on` | Loop detection heuristic. Detects repetitive reasoning patterns and nudges the model to commit to a decision. |
+| `think-nudge-rate` | `Number` | `0.01` to `1.0` | `0.25` | Repetition threshold: triggers when 25% of the last 1024 thinking tokens repeat earlier 8-grams. |
+| `think-nudge-min-tokens` | `Int` | `1024` to `16777216` | `3072` | Minimum thinking tokens generated before cycle detection activates. |
+| `think-nudge-wording` | `Text` | `commit`, `decide` | `commit` | Guidance prompt wording: `commit` (*"... commit to the most promising approach now"*) or `decide` (*"... state my decision and the exact next command"*). |
+| `think-end-guard` | `OnOff` | `on`, `off` | `on` | Prevents turn finalization if `<think>` or `<tool_call>` blocks remain open. |
+| `think-close-on-call` | `OnOff` | `on`, `off` | `on` | Automatically injects `</think>` before an opened `<tool_call>` if the model initiates a call inside reasoning. |
+| `literal-tags` | `OnOff` | `on`, `off` | `on` | Treats tag strings as literal text unless immediately preceded by a newline (guards against hallucinated formatting tags). |
 
 ---
 
