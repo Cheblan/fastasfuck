@@ -3,6 +3,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-6f42c1"></a>
   <img alt="Platform: Arch Linux, AMD Strix Halo (gfx1151)" src="https://img.shields.io/badge/platform-Arch%20Linux%20%C2%B7%20Strix%20Halo%20gfx1151-1abc9c">
+  <a href="https://huggingface.co/collections/Cheblan/fastasfuck-quantizations"><img alt="Hugging Face Collection" src="https://img.shields.io/badge/weights-Hugging%20Face%20Collection-ffcc4d"></a>
   <a href="https://github.com/Cheblan/fastasfuck"><img alt="Repository" src="https://img.shields.io/badge/github-fastasfuck-blue"></a>
 </p>
 
@@ -54,7 +55,7 @@ Full methodology, per-prompt latency distributions, and reproducibility scripts:
 | **64k Context** | 60,183 tokens | 1,427.9 tok/s | **1,424.9 ± 5.1 tok/s** (n = 3) | 42.22 s |
 | **128k Context** | 126,482 tokens | 1,376.9 tok/s | **1,377.9 ± 1.4 tok/s** (n = 3) | 91.79 s |
 
-*Note:* Evaluated on non-repeating C++ source code (`serve/*.cpp`, `serve/*.hpp`). Zero throughput penalty between cold NVMe and warm RAM at ≥ 16k context because `set_lookahead` asynchronously prefetches chunk $k+1$ during chunk $k$ compute.
+*Note:* Evaluated on non-repeating C++ source code (`serve/*.cpp`, `serve/*.hpp`). Zero throughput penalty between cold NVMe and warm RAM at ≥ 16k context because `set_lookahead` asynchronously prefetches chunk k+1 during chunk k compute.
 
 ### 3. Multi-Slot Concurrency Scaling
 *Parallel concurrent multi-agent load (T = 0.6, n = 3 measurement trials after warmup).*
@@ -146,7 +147,15 @@ git clone https://github.com/Cheblan/fastasfuck && cd fastasfuck
 cmake --preset strix && cmake --build --preset strix
 ```
 
-### 3. Run the Server
+### 3. Download Quantized Model Weights
+Download pre-quantized weights, n-gram table, and tokenizer from the [Hugging Face Collection](https://huggingface.co/collections/Cheblan/fastasfuck-quantizations):
+
+```sh
+# Example: ThinkingCap (recommended production default)
+huggingface-cli download Cheblan/ThinkingCap-Qwen3.8-Flash-Next-faf --local-dir /models/Thinking-Cap-Qwen-3.8-FN-faf
+```
+
+### 4. Run the Server
 Serve an OpenAI-compatible API on port 5300:
 
 ```sh
@@ -155,7 +164,7 @@ build/strix/fastasfuck_server --config deploy/fastasfuck-server.conf
 
 For a comprehensive guide to every configuration parameter, memory sizing, and production recommendations, see [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
-### 4. Verify & Query
+### 5. Verify & Query
 ```sh
 curl -s localhost:5300/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"Hello!"}]}'
