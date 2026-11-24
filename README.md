@@ -18,7 +18,7 @@ Designed for heavy concurrent coding workloads (OpenCode 2, Codex CLI, Cursor) w
 |---|---|
 | **Multi-Agent Decode (4 slots)** | **104.4 tok/s aggregate mean** (up to **115.5 tok/s** peak) |
 | **Solo Decode (T = 0.0)** | **89.7 tok/s** (P2 math) · **86.8 tok/s** (P1 code) · **73.8 tok/s** Grand Mean |
-| **Prefill Bandwidth** | **~1,458 tok/s** at 32k · **~1,378 tok/s** at 128k context |
+| **Prefill Bandwidth** | **~1,820 tok/s** (Monotonic Peak) · **~1,458 tok/s** (Real-World Code at 32k) |
 | **Context Window** | **512k tokens** with YaRN and Q8 chunked KV cache |
 | **Bit-Identity Law** | **100.000% exact SHA-256 determinism** across all standardized benchmarks |
 | **Agent Protocol** | **OpenAI Responses API (`/v1/responses`)** over HTTP & WebSocket |
@@ -45,17 +45,17 @@ Full methodology, per-prompt latency distributions, and reproducibility scripts:
 | **MEAN** | **Grand Mean Across All Prompts** | — | **53.0 ms** | **73.78 tok/s** | **100.000% VERIFIED** |
 
 ### 2. Prefill Context Scaling
-*1 Active Slot, T = 0.0, evaluated on non-repeating C++ source repository files, cold NVMe lookahead reads vs warm RAM/PLE cache.*
+*1 Active Slot, T = 0.0, chunk = 4096: Monotonic compute peak vs Real-world non-repeating C++ source repository files.*
 
-| Context Window | Evaluated Tokens | Cold Prefill (NVMe) | Warm Prefill (RAM/PLE) | Time to First Token (TTFT) |
-|---|---|---|---|---|
-| **4k Context** | 4,395 tokens | 1,388.9 tok/s | **1,437.6 ± 30.4 tok/s** (n = 5) | 3.06 s |
-| **16k Context** | 15,683 tokens | 1,433.8 tok/s | **1,454.2 ± 4.5 tok/s** (n = 5) | 10.78 s |
-| **32k Context** | 30,899 tokens | 1,440.9 tok/s | **1,457.9 ± 6.2 tok/s** (n = 5) | 21.20 s |
-| **64k Context** | 60,183 tokens | 1,427.9 tok/s | **1,424.9 ± 5.1 tok/s** (n = 3) | 42.22 s |
-| **128k Context** | 126,482 tokens | 1,376.9 tok/s | **1,377.9 ± 1.4 tok/s** (n = 3) | 91.79 s |
+| Context Window | Evaluated Tokens | Monotonic / GEMM Peak | Real Code (Cold NVMe) | Real Code (Warm RAM/PLE) | Real Code TTFT |
+|---|---|---|---|---|---|
+| **4k Context** | 4,395 tokens | **1,865.0 tok/s** | 1,388.9 tok/s | **1,437.6 ± 30.4 tok/s** (n = 5) | 3.06 s |
+| **16k Context** | 15,683 tokens | **1,844.2 tok/s** | 1,433.8 tok/s | **1,454.2 ± 4.5 tok/s** (n = 5) | 10.78 s |
+| **32k Context** | 30,899 tokens | **1,819.5 tok/s** | 1,440.9 tok/s | **1,457.9 ± 6.2 tok/s** (n = 5) | 21.20 s |
+| **64k Context** | 60,183 tokens | **1,771.8 tok/s** | 1,427.9 tok/s | **1,424.9 ± 5.1 tok/s** (n = 3) | 42.22 s |
+| **128k Context** | 126,482 tokens | **1,720.5 tok/s** | 1,376.9 tok/s | **1,377.9 ± 1.4 tok/s** (n = 3) | 91.79 s |
 
-*Note:* Evaluated on non-repeating C++ source code (`serve/*.cpp`, `serve/*.hpp`). Zero throughput penalty between cold NVMe and warm RAM at ≥ 16k context because `set_lookahead` asynchronously prefetches chunk k+1 during chunk k compute.
+*Note:* Real-world evaluation conducted on non-repeating C++ source code (`serve/*.cpp`, `serve/*.hpp`). Zero throughput penalty between cold NVMe and warm RAM at ≥ 16k context because `set_lookahead` asynchronously prefetches chunk k+1 during chunk k compute.
 
 ### 3. Multi-Slot Concurrency Scaling
 *Parallel concurrent multi-agent load (T = 0.6, n = 3 measurement trials after warmup).*

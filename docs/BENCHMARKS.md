@@ -60,18 +60,17 @@ The engine provides `--mtp-vocab-filter` to control the vocabulary coverage of t
 
 ## 3. Table 2: Prefill Context Scaling (1 Slot)
 
-- **Execution Profile:** 1 Active Slot, T = 0.0.
-- **Corpus:** Real non-repeating C++ source repository files (`serve/*.cpp`, `serve/*.hpp`, 945,000 characters).
-- **Cold vs Warm PLE:** Cold run reflects uncached NVMe lookahead reads; Warm run reflects hot n-gram row buffers in RAM.
-- **Protocol:** n = 5 trials for 4k–32k, n = 3 trials for 64k–128k (+ 1 untimed warmup ping).
+We evaluate prefill scaling under two complementary workloads at T = 0.0 (`chunk = 4096`):
+1. **Monotonic / Synthetic Prefill:** Uniform prompt tokens measuring the peak GEMM compute saturation of 40 CUs RDNA 3.5 without cache misses or parsing overhead.
+2. **Real-World Code Corpus:** Non-repeating C++ source repository files (`serve/*.cpp`, `serve/*.hpp`, 945,000 characters) measuring sustained end-to-end prefill throughput on unified LPDDR5X-8533 memory, comparing cold NVMe lookahead reads with warm RAM/PLE cache.
 
-| Context Target | Actual Evaluated Tokens | Cold Prefill Speed (NVMe) | Warm Prefill Speed (RAM/PLE) | Time to First Token (TTFT) |
-|---|---|---|---|---|
-| **4k Context** | 4,395 tokens | 1,388.9 tok/s | **1,437.6 ± 30.4 tok/s** (n = 5) | 3.06 s |
-| **16k Context** | 15,683 tokens | 1,433.8 tok/s | **1,454.2 ± 4.5 tok/s** (n = 5) | 10.78 s |
-| **32k Context** | 30,899 tokens | 1,440.9 tok/s | **1,457.9 ± 6.2 tok/s** (n = 5) | 21.20 s |
-| **64k Context** | 60,183 tokens | 1,427.9 tok/s | **1,424.9 ± 5.1 tok/s** (n = 3) | 42.22 s |
-| **128k Context** | 126,482 tokens | 1,376.9 tok/s | **1,377.9 ± 1.4 tok/s** (n = 3) | 91.79 s |
+| Context Target | Evaluated Tokens | Monotonic / GEMM Peak | Real Code (Cold NVMe) | Real Code (Warm RAM/PLE) | Real Code TTFT |
+|---|---|---|---|---|---|
+| **4k Context** | 4,395 tokens | **1,865.0 tok/s** | 1,388.9 tok/s | **1,437.6 ± 30.4 tok/s** (n = 5) | 3.06 s |
+| **16k Context** | 15,683 tokens | **1,844.2 tok/s** | 1,433.8 tok/s | **1,454.2 ± 4.5 tok/s** (n = 5) | 10.78 s |
+| **32k Context** | 30,899 tokens | **1,819.5 tok/s** | 1,440.9 tok/s | **1,457.9 ± 6.2 tok/s** (n = 5) | 21.20 s |
+| **64k Context** | 60,183 tokens | **1,771.8 tok/s** | 1,427.9 tok/s | **1,424.9 ± 5.1 tok/s** (n = 3) | 42.22 s |
+| **128k Context** | 126,482 tokens | **1,720.5 tok/s** | 1,376.9 tok/s | **1,377.9 ± 1.4 tok/s** (n = 3) | 91.79 s |
 
 *Note on I/O Lookahead:* On prompts ≥ 16k, Cold NVMe and Warm RAM prefill throughput are virtually identical (< 1% delta) because the engine's `set_lookahead` thread asynchronously reads chunk k+1 from NVMe into pinned host memory while chunk k executes on the GPU compute units.
 
