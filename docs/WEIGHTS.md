@@ -134,6 +134,14 @@ Every method below was implemented and evaluated identically across all 48 layer
 | `FP64 ActOrder + Q6_Hotspots` (`gdn_out/attn_o/sh_d`) | `0.022498` | `-28.0%` | `0.001116` | `0.074003` | `3.1342` | `96.01%` | Tradeoff — tighter p95, slightly worse Mean KLD |
 | **`FP64 ActOrder StaticG + Shrink512` (`--mode actorder`)** | **`0.021643`** | **`-30.7%`** | **`0.001175`** | **`0.084673`** | `3.1746` | **`95.85%`** | **Production Winner** (`0.021547` / `PPL 3.1093` in full-FP64) |
 
+#### Calibrated Release Matrix (All 3 Qwen 3.8-Flash-Next Models, `CALIB_DOC`, `T_eval = 1,807`)
+
+| Model | Variant | Mean KLD vs BF16 | Δ vs RTN | p95 KLD | Max KLD | PPL (Δ vs BF16) | Top-1 | Top-5 | MTP `q8` Top-1 / KLD |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **ThinkingCap-Qwen3.8-FN** | `RTN` → **`GPTQ`** | `0.031249 →` **`0.021643`** | **`-30.7%`** | `0.084673` | `2.674 →` **`1.987`** | `3.1163 → 3.1746` *(full-FP64 `3.1093`)* | **`95.85%`** | **`99.94%`** | `83.32%` / **`0.4076`** |
+| **Swift-1.5-Qwen3.8-FN** | `RTN` → **`GPTQ`** | `0.037388 →` **`0.021508`** | **`-42.5%`** | `0.1287 →` **`0.0864`** | `4.640 →` **`1.661`** | `2.9925 →` **`2.9986`** *(BF16 `3.0020`)* | `94.74%` | **`99.94%`** | **`85.43%`** / **`0.3787`** |
+| **Qwen3.8-Flash-Next (Base)** | `RTN` → **`GPTQ`** | `0.030376 →` **`0.021393`** | **`-29.6%`** | `0.1113 →` **`0.0849`** | `3.596 →` **`1.539`** | `3.0327 → 3.0508` *(BF16 `3.0119`)* | **`95.40%`** | **`99.94%`** | `84.82%` / `0.4017` |
+
 #### Critical Rules When Quantizing Your Own Weights or Tuning GPTAQ
 
 1. **Always Accumulate Hessians Strictly in FP64 (`.double()`):**
