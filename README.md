@@ -174,6 +174,16 @@ Point any OpenAI-compatible client (Codex CLI, OpenCode 2, Cursor) at `http://<y
 
 ---
 
+## Quantized Weights & Custom Calibration (FP64 ActOrder GPTQ)
+
+Production `.faf` packages pair Hybrid `Q4_G128` (`exp_gu`, `exp_down`, `gdn_in`) + `Q6_G64` (dense attention/GDN out/shared expert) + `Q8_G64` (`hc`, `lm_head`) with **full-rank 61,440-token FP64 ActOrder GPTQ (`static_groups=True` + Empirical Bayes Shrink512 across all 512 experts)**:
+
+- **`-30.7%` lower held-out KLD vs. RTN** (`0.031249 → 0.021643`, Top-1 vs BF16 `94.80% → 95.85%`, Top-5 `99.94%`).
+- **Exact byte & speed parity:** `65.51 GiB` (`70,337,409,024 B`), zero `g_idx` overhead (`74.16 ± 2.04 tok/s` Solo MTP across 30 prompts at `T = 0.0` vs `73.65` RTN; `71.81` vs `68.43 tok/s` at `T = 0.6`).
+- **Quantize custom checkpoints or evaluate GPTQ vs GPTAQ:** Run [`tools/quantize_qwen_gptq.py`](tools/quantize_qwen_gptq.py) + `convert_qwen4exp --prebuilt`. See [docs/WEIGHTS.md](docs/WEIGHTS.md) for the complete `.faf` precision schema, GPTQ vs. GPTAQ ablation findings, and ROCm/Strix Halo quantization best practices.
+
+---
+
 ## License
 
 [AGPL-3.0](LICENSE). The engine server is licensed under AGPL-3.0. Licenses for served model weights are separate and governed by their respective authors.

@@ -191,7 +191,7 @@ std::string Qwen4ExpBackend::state_fingerprint() const {
     const FafFile &f = model_.weights().file();
     // The layout string is long; its hash keeps the fingerprint short (the header holds < 192 chars).
     const std::string &layout = f.meta("layout");
-    char buf[160];
+    char buf[192];
     // v2: the MTP head's state follows the trunk's when MTP is on ("mtp" - a state from a session without it lacks it).
     // YaRN: the K caches and indexer block keys hold keys rotated with the factor's table, so a state is only valid
     // under the same factor (" yarn<f>"; nothing without YaRN, so the plain entries stay valid).
@@ -200,13 +200,18 @@ std::string Qwen4ExpBackend::state_fingerprint() const {
     // Precision: a state built with a non-exact step is not the one the exact math builds (" gdn=fast"; nothing when
     // all exact, so the existing entries stay valid).
     const std::string prec = session_->precision().exact() ? std::string() : " " + session_->precision().describe();
+    // Calibrated weights (GPTQ/prebuilt): share source_fingerprint & layout with RTN weights, so tag .pcache
+    // entries by prebuilt_fingerprint whenever present (older uncalibrated .faf files omit it cleanly).
+    std::string cal;
+    if (auto it = f.meta().find("prebuilt_fingerprint"); it != f.meta().end() && !it->second.empty() && it->second != "none")
+        cal = " cal-" + it->second;
     // 8-bit K/V (" kv8"): another state layout - a BF16 entry is dropped at load, never misread (nothing for the
     // activation dtype's K/V, so those entries stay valid).
-    const int n = std::snprintf(buf, sizeof buf, "qwen4exp-state-v2 %s layout-%016llx %s L%lld%s%s%s%s",
+    const int n = std::snprintf(buf, sizeof buf, "qwen4exp-state-v2 %s layout-%016llx %s L%lld%s%s%s%s%s",
                                 f.meta("source_fingerprint").c_str(), (unsigned long long)strix_hash64(layout.data(), layout.size()),
                                 kernels::act_name(model_.act()), (long long)model_.dims().layers,
                                 session_->has_mtp() ? " mtp" : "", yarn, prec.c_str(),
-                                session_->kv_format() == KvFormat::Q8 ? " kv8" : "");
+                                session_->kv_format() == KvFormat::Q8 ? " kv8" : "", cal.c_str());
     STRIX_CHECK(n > 0 && n < (int)sizeof buf, "Qwen4ExpBackend::state_fingerprint: ", n, " characters, expected < ", sizeof buf);
     return buf;
 }
