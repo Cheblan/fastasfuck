@@ -281,6 +281,110 @@ private:
     uint64_t bytes_ = 0;
 };
 
+// Prebuilt quantized tensor store (--prebuilt DIR): reads pre-quantized <out_name>.{q,scale,minv}
+// components directly from *.safetensors shards without re-quantizing. Generic over Q4/Q5/Q6/Q8.
+class PrebuiltStore {
+public:
+    explicit PrebuiltStore(const std::string &dir) : dir_(dir) {
+        STRIX_CHECK(fs::is_directory(dir), "convert --prebuilt: '", dir, "' is not a directory");
+        std::vector<std::string> paths;
+        for (const auto &e : fs::directory_iterator(dir))
+            if (e.path().extension() == ".safetensors") paths.push_back(e.path().string());
+        STRIX_CHECK(!paths.empty(), "convert --prebuilt: no *.safetensors in '", dir, "'");
+        std::sort(paths.begin(), paths.end());
+        std::string fp;
+        for (const std::string &p : paths) {
+            files_.push_back(std::make_unique<SafetensorsFile>(p));
+            const int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC);
+            STRIX_CHECK(fd >= 0, "convert --prebuilt: open '", p, "' failed: ", std::strerror(errno));
+            fds_.push_back(fd);
+            for (const TensorInfo &ti : files_.back()->tensors()) {
+                auto [it, fresh] = where_.emplace(ti.name, std::make_pair(files_.size() - 1, &ti));
+                STRIX_CHECK(fresh, "convert --prebuilt: duplicate tensor '", ti.name, "'");
+                const size_t dot = ti.name.rfind('.');
+                STRIX_CHECK(dot != std::string::npos, "convert --prebuilt: tensor '", ti.name,
+                            "' missing .{q,scale,minv} suffix");
+                const std::string base = ti.name.substr(0, dot), role = ti.name.substr(dot + 1);
+                STRIX_CHECK(role == "q" || role == "scale" || role == "minv", "convert --prebuilt: unexpected role '",
+                            role, "' in '", ti.name, "'");
+                bases_.insert(base);
+            }
+            uint64_t hlen = 0;
+            STRIX_CHECK(::pread(fd, &hlen, 8, 0) == 8 && hlen < (1ull << 30),
+                        "convert --prebuilt: bad header length in '", p, "'");
+            std::string h(hlen, '\0');
+            STRIX_CHECK(::pread(fd, h.data(), hlen, 8) == (ssize_t)hlen, "convert --prebuilt: short header read in '", p,
+                        "'");
+            fp += fs::path(p).filename().string() + ":" + std::to_string(files_.back()->file_size()) + ":" + h;
+        }
+        fingerprint_ = hex64(strix_hash64(fp.data(), fp.size()));
+        for (const std::string &b : bases_) {
+            STRIX_CHECK(where_.count(b + ".q") && where_.count(b + ".scale") && where_.count(b + ".minv"),
+                        "convert --prebuilt: incomplete component set for '", b, "' (need .q, .scale, .minv)");
+        }
+        const std::string meta_path = dir + "/calib_meta.json";
+        if (fs::exists(meta_path)) {
+            FILE *f = std::fopen(meta_path.c_str(), "rb");
+            STRIX_CHECK(f != nullptr, "convert --prebuilt: can't open '", meta_path, "'");
+            char buf[65536];
+            size_t r = std::fread(buf, 1, sizeof buf, f);
+            std::fclose(f);
+            calib_meta_.assign(buf, r);
+        }
+    }
+    ~PrebuiltStore() {
+        for (int fd : fds_) ::close(fd);
+    }
+    bool has(const std::string &base) const { return bases_.count(base) != 0; }
+    size_t count() const { return bases_.size(); }
+    const std::string &fingerprint() const { return fingerprint_; }
+    const std::string &calib_meta() const { return calib_meta_; }
+
+    template <typename W> void load(const std::string &base, W &out) const {
+        used_.insert(base);
+        load_comp(base + ".q", Dtype::U8, out.q.data(), out.q.size());
+        load_comp(base + ".scale", Dtype::BF16, out.scale.data(), out.scale.size() * 2);
+        load_comp(base + ".minv", Dtype::BF16, out.minv.data(), out.minv.size() * 2);
+    }
+
+    std::vector<std::string> unconsumed() const {
+        std::vector<std::string> out;
+        for (const std::string &b : bases_)
+            if (!used_.count(b)) out.push_back(b);
+        return out;
+    }
+
+private:
+    void load_comp(const std::string &name, Dtype expect_dt, void *dst, size_t expect_bytes) const {
+        auto it = where_.find(name);
+        STRIX_CHECK(it != where_.end(), "convert --prebuilt: missing '", name, "'");
+        const TensorInfo &ti = *it->second.second;
+        STRIX_CHECK(ti.dtype == expect_dt, "convert --prebuilt: '", name, "' has dtype ", dtype_name(ti.dtype),
+                    ", expected ", dtype_name(expect_dt));
+        STRIX_CHECK(ti.byte_length == expect_bytes, "convert --prebuilt: '", name, "' has ", ti.byte_length,
+                    " bytes, expected ", expect_bytes);
+        const int fd = fds_[it->second.first];
+        auto *p = static_cast<uint8_t *>(dst);
+        uint64_t at = ti.byte_offset;
+        size_t left = expect_bytes;
+        while (left > 0) {
+            const ssize_t r = ::pread(fd, p, std::min<size_t>(left, 1u << 30), (off_t)at);
+            if (r < 0 && errno == EINTR) continue;
+            STRIX_CHECK(r > 0, "convert --prebuilt: pread of '", name, "' failed: ",
+                        r < 0 ? std::strerror(errno) : "unexpected EOF");
+            p += r, at += (uint64_t)r, left -= (size_t)r;
+        }
+        (void)::posix_fadvise(fd, (off_t)ti.byte_offset, (off_t)expect_bytes, POSIX_FADV_DONTNEED);
+    }
+
+    std::string dir_, fingerprint_, calib_meta_;
+    std::vector<std::unique_ptr<SafetensorsFile>> files_;
+    std::vector<int> fds_;
+    std::map<std::string, std::pair<size_t, const TensorInfo *>> where_;
+    std::set<std::string> bases_;
+    mutable std::set<std::string> used_;
+};
+
 // ---------------------------------------------------------------- layout
 
 // Per-class weight formats by class name, so a measured variant converts as written: "default=q4g64,gdn_in=q8g64,...". Plus mtp_fc (the MTP head's two input projections).
@@ -1016,6 +1120,12 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
 
     log("reading the checkpoint's headers from %s ...", opt.src_dir.c_str());
     Source src(opt.src_dir);
+    std::unique_ptr<PrebuiltStore> prebuilt;
+    if (!opt.prebuilt_dir.empty()) {
+        prebuilt = std::make_unique<PrebuiltStore>(opt.prebuilt_dir);
+        log("  prebuilt override: %s (%zu quantized tensors, fingerprint %s)", opt.prebuilt_dir.c_str(),
+            prebuilt->count(), prebuilt->fingerprint().c_str());
+    }
     std::string mtp_source;
     if (!opt.mtp_from.empty()) {
         STRIX_CHECK(opt.mtp, "convert: --mtp-from with --no-mtp - nothing would use it");
@@ -1090,6 +1200,8 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         {"globals", opt.globals ? "yes" : "no"},
         {"mtp", opt.mtp ? "yes" : "no"},
         {"mtp_source", mtp_source.empty() ? "checkpoint" : mtp_source},
+        {"calibration", prebuilt && !prebuilt->calib_meta().empty() ? prebuilt->calib_meta() : "none"},
+        {"prebuilt_fingerprint", prebuilt ? prebuilt->fingerprint() : "none"},
         {"complete", complete ? "yes" : "no"},
         {"format_note", "embedding BF16 (not layout A's int8); n-gram table not included (OPEN)"}};
     FafWriter writer(partial, meta, outs);
@@ -1140,11 +1252,14 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
         const FafTensor &planned = writer.tensors()[si];
 
         if (s.op == ConvertOp::Q4Merge || s.op == ConvertOp::Q4ChunkMajor || s.op == ConvertOp::Q4FoldHC) {
-          // Generic over the weight type: Q4 or Q8, every op (merged rows, the HC fold, chunk-major).
+          // Generic over the weight type: Q4, Q5, Q6 or Q8, every op (merged rows, the HC fold, chunk-major).
           auto quantize_step = [&](auto proto) {
             using W = decltype(proto);
             const int64_t N = s.out.shape[0], K = s.out.shape[1], G = s.out.group_size;
             W q = empty_w<W>(N, K, G);
+            const bool use_prebuilt = prebuilt && prebuilt->has(s.out.name);
+            if (use_prebuilt) prebuilt->load(s.out.name, q);
+
             if (s.op == ConvertOp::Q4FoldHC) {
                 // Fold in FP32: w' = w * (1 + hc_norm[k]), exactly as the HC kernel's reference does.
                 const std::vector<float> norm = src.read_f32(s.sources[2]);
@@ -1156,30 +1271,32 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
                         for (int64_t k = 0; k < K; ++k)
                             di[(size_t)(row * K + k)] = w[(size_t)(i * K + k)] * (1.0f + norm[(size_t)k]);
                 }
-                quantize_rows(di.data(), N, q, 0, threads);
+                if (!use_prebuilt) quantize_rows(di.data(), N, q, 0, threads);
                 err = sampled_error(q, [&](int64_t r, float *dst) { std::memcpy(dst, &di[(size_t)(r * K)], K * 4); });
             } else {
                 // Stream each part in ~256 MB chunks: the next chunk is read while this one quantizes.
                 std::vector<FafPart> parts = s.out.parts;
                 if (parts.empty()) parts.push_back({s.sources[0], 0, N});
-                const int64_t chunk_rows = std::max<int64_t>(1, (int64_t)(kChunkBytes / (size_t)(K * 2)));
-                std::vector<uint16_t> buf[2];
-                for (const FafPart &p : parts) {
-                    auto read = [&, name = p.source](int64_t r0, int64_t n, std::vector<uint16_t> &b) {
-                        b.resize((size_t)(n * K));
-                        src.read(name, (uint64_t)(r0 * K * 2), (size_t)(n * K * 2), b.data());
-                    };
-                    int cur = 0;
-                    std::future<void> next = std::async(std::launch::async, read, 0,
-                                                        std::min(chunk_rows, p.rows), std::ref(buf[0]));
-                    for (int64_t r0 = 0; r0 < p.rows; r0 += chunk_rows) {
-                        next.get();
-                        const int64_t n = std::min(chunk_rows, p.rows - r0), r1 = r0 + n;
-                        if (r1 < p.rows)
-                            next = std::async(std::launch::async, read, r1, std::min(chunk_rows, p.rows - r1),
-                                              std::ref(buf[1 - cur]));
-                        quantize_rows(buf[cur].data(), n, q, p.row_offset + r0, threads);
-                        cur = 1 - cur;
+                if (!use_prebuilt) {
+                    const int64_t chunk_rows = std::max<int64_t>(1, (int64_t)(kChunkBytes / (size_t)(K * 2)));
+                    std::vector<uint16_t> buf[2];
+                    for (const FafPart &p : parts) {
+                        auto read = [&, name = p.source](int64_t r0, int64_t n, std::vector<uint16_t> &b) {
+                            b.resize((size_t)(n * K));
+                            src.read(name, (uint64_t)(r0 * K * 2), (size_t)(n * K * 2), b.data());
+                        };
+                        int cur = 0;
+                        std::future<void> next = std::async(std::launch::async, read, 0,
+                                                            std::min(chunk_rows, p.rows), std::ref(buf[0]));
+                        for (int64_t r0 = 0; r0 < p.rows; r0 += chunk_rows) {
+                            next.get();
+                            const int64_t n = std::min(chunk_rows, p.rows - r0), r1 = r0 + n;
+                            if (r1 < p.rows)
+                                next = std::async(std::launch::async, read, r1, std::min(chunk_rows, p.rows - r1),
+                                                  std::ref(buf[1 - cur]));
+                            quantize_rows(buf[cur].data(), n, q, p.row_offset + r0, threads);
+                            cur = 1 - cur;
+                        }
                     }
                 }
                 err = sampled_error(q, [&](int64_t r, float *dst) {
@@ -1275,6 +1392,14 @@ ConvertResult convert_qwen4exp(const ConvertOptions &opt) {
                 fmt_bytes(rate).c_str(), fmt_bytes((double)done_out).c_str(), fmt_bytes((double)planned_out).c_str(),
                 fmt_dur(eta).c_str());
         }
+    }
+
+    if (prebuilt && complete) {
+        const auto unused = prebuilt->unconsumed();
+        std::string list;
+        for (size_t i = 0; i < unused.size() && i < 10; ++i) list += "\n  " + unused[i];
+        STRIX_CHECK(unused.empty(), "convert --prebuilt: ", unused.size(),
+                    " prebuilt base tensors were not consumed by any step (name mismatch or unsupported op):", list);
     }
 
     log.blank();

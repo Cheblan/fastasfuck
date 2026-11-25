@@ -2,10 +2,12 @@
 // Verbose by default: every step is logged to stderr and to <out>/convert.log.
 //
 // Usage: convert_qwen4exp --src DIR --out DIR --git HASH [--threads N] [--layout default=q4g64,...]
-//                         [--layers 0,3,7] [--no-globals] [--no-mtp] [--mtp-from FILE] [--vision]
-//                         [--tower-only] [--plan]
+//                         [--layers 0,3,7] [--no-globals] [--no-mtp] [--mtp-from FILE] [--prebuilt DIR]
+//                         [--vision] [--tower-only] [--plan]
 //   --mtp-from    replace the checkpoint's mtp.* tensors with this safetensors file's (a fine-tuned draft head);
 //                 the trunk and its fingerprint stay the checkpoint's
+//   --prebuilt    use pre-quantized <tensor>.{q,scale,minv} from *.safetensors in DIR (e.g. calibrated GPTQ Q4);
+//                 every remaining tensor quantizes normally from --src
 //   --vision      also write <out>/vision.faf: the vision tower as exact BF16, validated against the
 //                 checkpoint's config.json "vision_config"
 //   --tower-only  (implies --vision) write <out>/vision.faf and nothing else - adds the tower to an
@@ -79,13 +81,14 @@ int run(int argc, char **argv) {
         } else if (a == "--no-globals") o.globals = false;
         else if (a == "--no-mtp") o.mtp = false;
         else if (a == "--mtp-from") o.mtp_from = value("--mtp-from");
+        else if (a == "--prebuilt") o.prebuilt_dir = value("--prebuilt");
         else if (a == "--vision") o.vision = true;
         else if (a == "--tower-only") o.vision = true, o.tower_only = true;
         else if (a == "--plan") o.plan_only = true;
         else {
             std::fprintf(stderr,
                          "usage: %s --src DIR --out DIR --git HASH [--threads N] [--layout default=q4g64,...] "
-                         "[--layers 0,3] [--no-globals] [--no-mtp] [--mtp-from FILE] [--vision] "
+                         "[--layers 0,3] [--no-globals] [--no-mtp] [--mtp-from FILE] [--prebuilt DIR] [--vision] "
                          "[--tower-only] [--plan]\n",
                          argv[0]);
             return 2;

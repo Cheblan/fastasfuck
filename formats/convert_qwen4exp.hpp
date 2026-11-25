@@ -44,6 +44,9 @@ struct ConvertOptions {
     // src_dir, so source_fingerprint stays the checkpoint's (it pairs with the n-gram table); the metadata records
     // the file and its fingerprint as mtp_source. Empty: none.
     std::string mtp_from;
+    // Directory of prebuilt quantized tensors (*.safetensors storing <faf_tensor_name>.{q,scale,minv},
+    // plus optional calib_meta.json recorded in the output .faf "calibration" metadata). Generic across Q4/Q5/Q6/Q8.
+    std::string prebuilt_dir;
     bool plan_only = false;       // log the plan and stop (reads headers only)
     FILE *console = stderr;       // log sink besides out_dir/convert.log (nullptr: file only)
     // Vision tower: additionally write out_dir/vision.faf,
