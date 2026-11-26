@@ -17,8 +17,13 @@ GpuArbiter::GpuArbiter(LmBackend &be)
     : be_(be),
       epoch_((size_t)be.n_seqs(), 0),
       last_prefill_batch_(-kPrefillYieldBatches),
-      concurrent_((size_t)be.n_seqs(), 0) {
+      concurrent_((size_t)be.n_seqs(), 0),
+      slot_draft_ms_((size_t)be.n_seqs(), 0.0),
+      last_verify_bucket_((size_t)be.n_seqs(), 1) {
     STRIX_CHECK(be.n_seqs() >= 1, "GpuArbiter: the backend holds ", be.n_seqs(), " conversations, expected >= 1");
+    for (int b = 1; b <= kMaxBuckets; ++b) {
+        buckets_[(size_t)b].ema_round_gpu_ms = 25.0f + 20.0f * (float)b;
+    }
 }
 
 void GpuArbiter::check_ok_locked(int seq) const {
@@ -240,17 +245,41 @@ void GpuArbiter::run_batch(std::unique_lock<std::mutex> &lock) {
     busy_ = false;
     const double actual_verify_ms = (now_s() - t0) * 1e3;
     last_batch_seconds_ = actual_verify_ms / 1e3;
-    if (!err && hw_prof_) {
-        float expected_v_ms = hw_prof_->get_verify_cost(rows);
-        if (expected_v_ms > 1.0f) {
-            float ratio = (float)actual_verify_ms / expected_v_ms;
-            ratio = std::clamp(ratio, 0.5f, 3.0f);
-            s_verify_ = (1.0f - kEmaDecay) * s_verify_ + kEmaDecay * ratio;
+    if (!err) {
+        const int b = std::clamp((int)members.size(), 1, kMaxBuckets);
+        last_active_bucket_ = b;
+        double batch_draft_ms = 0.0;
+        for (int s : members) {
+            batch_draft_ms += slot_draft_ms_[(size_t)s];
+            slot_draft_ms_[(size_t)s] = 0.0;
+            last_verify_bucket_[(size_t)s] = b;
         }
-        float round_gpu_ms = (float)actual_verify_ms + (float)draft_ms_accum_;
-        draft_ms_accum_ = 0.0;
-        ema_round_gpu_ms_ = (1.0f - kEmaDecay) * ema_round_gpu_ms_ + kEmaDecay * round_gpu_ms;
-        ema_batch_runs_ = (1.0f - kEmaDecay) * ema_batch_runs_ + kEmaDecay * (float)members.size();
+        MtpBucket &bk = buckets_[(size_t)b];
+        float round_gpu_ms = std::max(0.1f, (float)actual_verify_ms + (float)batch_draft_ms);
+        if (bk.verify_rounds >= kOutlierWarmupRounds) {
+            const float lo = 0.5f * bk.ema_round_gpu_ms;
+            const float hi = 2.0f * bk.ema_round_gpu_ms;
+            if (round_gpu_ms < lo || round_gpu_ms > hi) {
+                ++bk.verify_outliers;
+                if (bk.verify_outliers < 3) {
+                    round_gpu_ms = std::clamp(round_gpu_ms, lo, hi);
+                }
+            } else {
+                bk.verify_outliers = 0;
+            }
+        }
+        if (hw_prof_) {
+            const bool is_solo = (members.size() == 1);
+            const float expected_v_ms = hw_prof_->get_verify_cost(rows, is_solo);
+            if (expected_v_ms > 1.0f) {
+                const float verify_eff = std::max(0.1f, round_gpu_ms - std::min(round_gpu_ms - 0.1f, (float)batch_draft_ms));
+                const float ratio = std::clamp(verify_eff / expected_v_ms, 0.5f, 3.0f);
+                bk.s_verify = (bk.verify_rounds == 0) ? ratio : ((1.0f - kEmaDecay) * bk.s_verify + kEmaDecay * ratio);
+            }
+        }
+        bk.ema_round_gpu_ms = (bk.verify_rounds == 0) ? round_gpu_ms
+                                                      : ((1.0f - kEmaDecay) * bk.ema_round_gpu_ms + kEmaDecay * round_gpu_ms);
+        ++bk.verify_rounds;
     }
     if (err && be_.failed()) {
         for (int m : members) pending_[m].done = true, pending_[m].error = err;  // the batch's own error
@@ -322,14 +351,36 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
     lock.lock();
     busy_ = false;
     const double actual_draft_ms = (now_s() - t0) * 1e3;
-    draft_ms_accum_ += actual_draft_ms;
-    if (!err && hw_prof_) {
-        float expected_d_ms = hw_prof_->get_draft_cost((int)members.size(), (int)epoch_.size());
-        if (expected_d_ms > 0.1f) {
-            float ratio = (float)actual_draft_ms / expected_d_ms;
-            ratio = std::clamp(ratio, 0.5f, 3.0f);
-            s_draft_ = (1.0f - kEmaDecay) * s_draft_ + kEmaDecay * ratio;
+    if (!err && !members.empty()) {
+        const double per_slot_draft = actual_draft_ms / (double)members.size();
+        for (int s : members) {
+            slot_draft_ms_[(size_t)s] += per_slot_draft;
         }
+        const int bd = std::clamp(std::max((int)members.size(), (int)decoding_.size()), 1, kMaxBuckets);
+        MtpBucket &bk = buckets_[(size_t)bd];
+        float step_ms = std::max(0.05f, (float)actual_draft_ms);
+        if (bk.draft_rounds >= kOutlierWarmupRounds) {
+            const float lo = 0.5f * bk.ema_draft_step_ms;
+            const float hi = 2.0f * bk.ema_draft_step_ms;
+            if (step_ms < lo || step_ms > hi) {
+                ++bk.draft_outliers;
+                if (bk.draft_outliers < 3) {
+                    step_ms = std::clamp(step_ms, lo, hi);
+                }
+            } else {
+                bk.draft_outliers = 0;
+            }
+        }
+        bk.ema_draft_step_ms = (bk.draft_rounds == 0) ? step_ms
+                                                      : ((1.0f - kEmaDecay) * bk.ema_draft_step_ms + kEmaDecay * step_ms);
+        if (hw_prof_) {
+            const float expected_d_ms = hw_prof_->get_draft_cost((int)members.size(), (int)epoch_.size());
+            if (expected_d_ms > 0.1f) {
+                const float ratio = std::clamp((float)actual_draft_ms / expected_d_ms, 0.5f, 3.0f);
+                bk.s_draft = (bk.draft_rounds == 0) ? ratio : ((1.0f - kEmaDecay) * bk.s_draft + kEmaDecay * ratio);
+            }
+        }
+        ++bk.draft_rounds;
     }
     if (err && be_.failed()) {
         for (int m : members) {
@@ -350,12 +401,12 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
     cv_.notify_all();
 }
 
-Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step) {
+Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step, float inv_T) {
     std::unique_lock<std::mutex> lock(mu_);
     check_ok_locked(seq);
     STRIX_CHECK(!pending_drafts_.count(seq), "GpuArbiter: seq ", seq, " drafts again before previous draft finished");
     PendingDraft &me = pending_drafts_[seq];
-    me.run = {seq, token_id, step};
+    me.run = {seq, token_id, step, inv_T};
     me.since = now_s();
     me.done = false;
     cv_.notify_all();
@@ -432,6 +483,8 @@ void GpuArbiter::reset(int seq) {
         if (last_prefill_seq_ == seq) last_prefill_seq_ = -1;
         resolving_.erase(seq);
         pending_drafts_.erase(seq);
+        slot_draft_ms_[(size_t)seq] = 0.0;
+        last_verify_bucket_[(size_t)seq] = 1;
     } else if (be_.failed()) {
         fail_locked();
     }
@@ -481,25 +534,94 @@ int GpuArbiter::active_drafting_count() const {
     return std::max(1, n - pending_v);
 }
 
+void GpuArbiter::set_hw_profile(const MtpHardwareProfile *prof) {
+    std::lock_guard<std::mutex> lock(mu_);
+    hw_prof_ = prof;
+    const float d_ms = (prof && prof->draft_step_ms > 0.0f) ? prof->draft_step_ms : 1.64f;
+    for (int b = 1; b <= kMaxBuckets; ++b) {
+        if (buckets_[(size_t)b].draft_rounds == 0) {
+            buckets_[(size_t)b].ema_draft_step_ms = d_ms;
+        }
+    }
+}
+
+const GpuArbiter::MtpBucket &GpuArbiter::read_bucket_locked(int requested_b, int &eff_b) const {
+    const int b = std::clamp(requested_b, 1, kMaxBuckets);
+    const MtpBucket &bk = buckets_[(size_t)b];
+    if (bk.verify_rounds > 0) {
+        eff_b = b;
+        return bk;
+    }
+    if (buckets_[1].verify_rounds > 0) {
+        eff_b = 1;
+        return buckets_[1];
+    }
+    eff_b = b;
+    return bk;
+}
+
 float GpuArbiter::cluster_tau() const {
     std::lock_guard<std::mutex> lock(mu_);
-    float denom = std::max(1.0f, ema_batch_runs_ * ema_slot_E_);
-    return std::max(1.0f, ema_round_gpu_ms_ / denom);
+    const int req_b = decoding_.empty() ? last_active_bucket_ : (int)decoding_.size();
+    int eff_b = 1;
+    const MtpBucket &bk = read_bucket_locked(req_b, eff_b);
+    const float denom = std::max(1.0f, (float)eff_b * bk.ema_slot_E);
+    return std::max(1.0f, bk.ema_round_gpu_ms / denom);
 }
 
 float GpuArbiter::scale_verify() const {
     std::lock_guard<std::mutex> lock(mu_);
-    return s_verify_;
+    const int req_b = decoding_.empty() ? last_active_bucket_ : (int)decoding_.size();
+    int eff_b = 1;
+    return read_bucket_locked(req_b, eff_b).s_verify;
 }
 
 float GpuArbiter::scale_draft() const {
     std::lock_guard<std::mutex> lock(mu_);
-    return s_draft_;
+    const int req_b = decoding_.empty() ? last_active_bucket_ : (int)decoding_.size();
+    const int b = std::clamp(req_b, 1, kMaxBuckets);
+    if (buckets_[(size_t)b].draft_rounds > 0) return buckets_[(size_t)b].s_draft;
+    if (buckets_[1].draft_rounds > 0) return buckets_[1].s_draft;
+    return buckets_[(size_t)b].s_draft;
 }
 
-void GpuArbiter::report_slot_acceptance(int accepted) {
+float GpuArbiter::ema_round_gpu_ms() const {
     std::lock_guard<std::mutex> lock(mu_);
-    ema_slot_E_ = (1.0f - kEmaDecay) * ema_slot_E_ + kEmaDecay * (float)accepted;
+    const int req_b = decoding_.empty() ? last_active_bucket_ : (int)decoding_.size();
+    int eff_b = 1;
+    return read_bucket_locked(req_b, eff_b).ema_round_gpu_ms;
+}
+
+float GpuArbiter::ema_draft_step_ms() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    const int req_b = decoding_.empty() ? last_active_bucket_ : (int)decoding_.size();
+    const int b = std::clamp(req_b, 1, kMaxBuckets);
+    if (buckets_[(size_t)b].draft_rounds > 0) return buckets_[(size_t)b].ema_draft_step_ms;
+    return buckets_[1].ema_draft_step_ms;
+}
+
+float GpuArbiter::bucket_scale_verify(int bucket) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return buckets_[(size_t)std::clamp(bucket, 1, kMaxBuckets)].s_verify;
+}
+
+float GpuArbiter::bucket_tau(int bucket) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    const int b = std::clamp(bucket, 1, kMaxBuckets);
+    const MtpBucket &bk = buckets_[(size_t)b];
+    const float denom = std::max(1.0f, (float)b * bk.ema_slot_E);
+    return std::max(1.0f, bk.ema_round_gpu_ms / denom);
+}
+
+void GpuArbiter::report_slot_acceptance(int seq, int accepted) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const int b = (seq >= 0 && seq < (int)last_verify_bucket_.size())
+                      ? std::clamp(last_verify_bucket_[(size_t)seq], 1, kMaxBuckets)
+                      : 1;
+    MtpBucket &bk = buckets_[(size_t)b];
+    const float e = std::max(1.0f, (float)accepted);
+    bk.ema_slot_E = (bk.accept_rounds == 0) ? e : ((1.0f - kEmaDecay) * bk.ema_slot_E + kEmaDecay * e);
+    ++bk.accept_rounds;
 }
 
 bool GpuArbiter::others_decoding(int seq) const {
@@ -544,8 +666,8 @@ void SeqBackend::set_lookahead(const std::vector<int32_t> &next_ids) {
     arb_.run_concurrent(seq_, true, [&] { arb_.backend().set_lookahead(seq_, next_ids); });
 }
 
-Top2 SeqBackend::forward_mtp_top2(int32_t token_id, int64_t step) {
-    return arb_.draft_top2(seq_, token_id, step);
+Top2 SeqBackend::forward_mtp_top2(int32_t token_id, int64_t step, float inv_T) {
+    return arb_.draft_top2(seq_, token_id, step, inv_T);
 }
 
 std::vector<float> SeqBackend::forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) {

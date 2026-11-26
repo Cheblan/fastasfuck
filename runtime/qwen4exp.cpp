@@ -3718,12 +3718,12 @@ std::vector<float> Qwen4ExpSession::forward_mtp_seq(int seq, int32_t token_id, i
     return logits;
 }
 
-Qwen4ExpSession::MtpTop2 Qwen4ExpSession::forward_mtp_top2(int32_t token_id, int64_t step) {
-    return forward_mtp_top2_seq(0, token_id, step);
+Qwen4ExpSession::MtpTop2 Qwen4ExpSession::forward_mtp_top2(int32_t token_id, int64_t step, float inv_T) {
+    return forward_mtp_top2_seq(0, token_id, step, inv_T);
 }
 
-Qwen4ExpSession::MtpTop2 Qwen4ExpSession::forward_mtp_top2_seq(int seq, int32_t token_id, int64_t step) {
-    std::vector<MtpDraftRun> runs = {{seq, token_id, step}};
+Qwen4ExpSession::MtpTop2 Qwen4ExpSession::forward_mtp_top2_seq(int seq, int32_t token_id, int64_t step, float inv_T) {
+    std::vector<MtpDraftRun> runs = {{seq, token_id, step, inv_T}};
     std::vector<MtpTop2> res = forward_mtp_top2_batch(runs);
     STRIX_CHECK(res.size() == 1, "forward_mtp_top2_seq: expected 1 result");
     return res[0];
@@ -3945,7 +3945,7 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(co
     for (size_t r = 0; r < (size_t)T; ++r) {
         const float *r_logits = logits_.get() + (size_t)r * (size_t)pick_vocab;
         auto *dev_pick = mtp_batch_picks_.get() + r;
-        kernels::mtp_pick(r_logits, pick_vocab, router_err_.get(), expert_err_.get(), attn_err_.get(),
+        kernels::mtp_pick(r_logits, pick_vocab, runs[r].inv_T, router_err_.get(), expert_err_.get(), attn_err_.get(),
                           emb_err_.get(), dev_pick, stream_);
     }
 
@@ -3974,7 +3974,7 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(co
             final_best = m_.compact_to_vocab()[(size_t)final_best];
         }
         mtp_done(runs[r].seq, runs[r].step);
-        results[r] = {final_best, p.best_v, p.second_v, p.nan != 0};
+        results[r] = {final_best, p.best_v, p.second_v, p.nan != 0, p.p_top1};
     }
     return results;
 }

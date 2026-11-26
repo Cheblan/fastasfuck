@@ -259,6 +259,9 @@ target_link_libraries(strix_serve_model PUBLIC strix_serve strix_model)
 add_executable(check_stream_calls tools/check_stream_calls.cpp)
 target_link_libraries(check_stream_calls PRIVATE strix_serve)
 
+add_executable(test_online_mtp_lut tools/test_online_mtp_lut.cpp)
+target_link_libraries(test_online_mtp_lut PRIVATE strix_serve)
+
 add_executable(fastasfuck_server tools/fastasfuck_server.cpp)
 target_link_libraries(fastasfuck_server PRIVATE strix_serve_model)
 

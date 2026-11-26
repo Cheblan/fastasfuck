@@ -1531,6 +1531,7 @@ void HttpServer::routes() {
         if (req.has_param("margin_slope")) engine_.set_mtp_margin_slope(std::stof(req.get_param_value("margin_slope")));
         if (req.has_param("gate_rule")) engine_.set_mtp_gate_rule(req.get_param_value("gate_rule"));
         if (req.has_param("sampled_gate")) engine_.set_sampled_gate(req.get_param_value("sampled_gate"));
+        if (req.has_param("lut_mode")) engine_.set_mtp_lut_mode(req.get_param_value("lut_mode"));
         if (req.has_param("lut_step_penalty")) engine_.set_mtp_lut_step_penalty(std::stof(req.get_param_value("lut_step_penalty")));
         if (req.has_param("ema_decay")) engine_.set_mtp_ema_decay(std::stof(req.get_param_value("ema_decay")));
         json::Value b = json::Value::object();
@@ -1541,6 +1542,7 @@ void HttpServer::routes() {
         b.set("mtp_margin_slope", json::Value::number(engine_.mtp_margin_slope()));
         b.set("mtp_gate_rule", json::Value::string(engine_.mtp_gate_rule_str()));
         b.set("sampled_gate", json::Value::string(engine_.sampled_gate_str()));
+        b.set("mtp_lut_mode", json::Value::string(engine_.mtp_lut_mode_str()));
         b.set("mtp_lut_step_penalty", json::Value::number(engine_.mtp_lut_step_penalty()));
         b.set("mtp_ema_decay", json::Value::number(engine_.mtp_ema_decay()));
         res.set_content(b.dump(), "application/json");
@@ -1656,6 +1658,16 @@ void HttpServer::routes() {
         metric("strix_cluster_tau_ms", "gauge", "Cluster-wide cost per accepted token (Renewal-Reward tau).", s.cluster_tau);
         metric("strix_scale_verify", "gauge", "Live EMA scale factor for verify latency.", s.scale_verify);
         metric("strix_scale_draft", "gauge", "Live EMA scale factor for draft latency.", s.scale_draft);
+        metric("strix_mtp_ema_round_ms", "gauge", "Live solo MTP round latency EMA (actual draft + verify ms).",
+               s.mtp_ema_round_ms);
+        metric("strix_mtp_ema_draft_step_ms", "gauge", "Live solo MTP draft step latency EMA (ms).",
+               s.mtp_ema_draft_step_ms);
+        metric("strix_mtp_tau_global_ms", "gauge", "Effective MTP cost per accepted token tau_global (ms).",
+               s.mtp_tau_global_ms);
+        metric("strix_mtp_solo_verify_scale", "gauge", "Live solo verify latency scale factor vs ctx=0 calibration.",
+               s.mtp_solo_verify_scale);
+        metric("strix_mtp_lut_updates_total", "counter", "Total OnlineMtpLut updates across verified rounds.",
+               (double)s.mtp_lut_updates_total);
         metric("strix_idle_seconds", "gauge",
                "Seconds since the last request finished; 0 while one runs or waits. Batch clients: wait for a gap here.",
                s.idle_seconds);
