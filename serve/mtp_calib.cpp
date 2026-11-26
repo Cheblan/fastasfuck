@@ -352,13 +352,12 @@ OnlineMtpLut::OnlineMtpLut() {
 
 void OnlineMtpLut::reset() {
     std::lock_guard<std::mutex> lock(mu_);
-    static constexpr float kRegimeScale[kRegimes] = {1.0f, 0.92f, 0.85f};
+    static constexpr float kRegimeScale[kRegimes] = {1.0f, 0.92f, 0.85f, 0.80f};
     for (int r = 0; r < kRegimes; ++r) {
         for (int k = 0; k < kMaxK; ++k) {
             const float step_decay = std::pow(0.95f, static_cast<float>(k));
             for (int b = 0; b < kBins; ++b) {
-                const float u_mid = (static_cast<float>(b) + 0.5f) / static_cast<float>(kBins);
-                const float bin_mid = 0.5f + 0.5f * u_mid;
+                const float bin_mid = (static_cast<float>(b) + 0.5f) / static_cast<float>(kBins);
                 const float p0 = std::clamp(bin_mid * step_decay * kRegimeScale[r], 0.05f, 0.98f);
                 cells_[r][k][b].hits = kPriorTrials * p0;
                 cells_[r][k][b].trials = kPriorTrials;
@@ -372,7 +371,13 @@ void OnlineMtpLut::reset() {
 int OnlineMtpLut::regime_for_temp(double temp) {
     if (temp <= 1e-6) return 0;
     if (temp <= 0.4) return 1;
-    return 2;
+    if (temp <= 0.8) return 2;
+    return 3;
+}
+
+int OnlineMtpLut::bin_for_prob(float p_top1) {
+    const float u = std::clamp(p_top1, 0.0f, 0.999999f);
+    return std::clamp(static_cast<int>(u * static_cast<float>(kBins)), 0, kBins - 1);
 }
 
 int OnlineMtpLut::bin_for_delta_logits(float delta_logits) {

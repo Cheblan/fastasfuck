@@ -26,6 +26,7 @@ struct Top2 {
     int32_t best = 0;
     float best_v = 0, second_v = 0;
     bool nan = false;
+    float p_top1 = 0.0f;
 };
 Top2 top2(const float *x, int64_t n);
 

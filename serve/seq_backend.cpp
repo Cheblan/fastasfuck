@@ -401,12 +401,12 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
     cv_.notify_all();
 }
 
-Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step) {
+Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step, float inv_T) {
     std::unique_lock<std::mutex> lock(mu_);
     check_ok_locked(seq);
     STRIX_CHECK(!pending_drafts_.count(seq), "GpuArbiter: seq ", seq, " drafts again before previous draft finished");
     PendingDraft &me = pending_drafts_[seq];
-    me.run = {seq, token_id, step};
+    me.run = {seq, token_id, step, inv_T};
     me.since = now_s();
     me.done = false;
     cv_.notify_all();
@@ -666,8 +666,8 @@ void SeqBackend::set_lookahead(const std::vector<int32_t> &next_ids) {
     arb_.run_concurrent(seq_, true, [&] { arb_.backend().set_lookahead(seq_, next_ids); });
 }
 
-Top2 SeqBackend::forward_mtp_top2(int32_t token_id, int64_t step) {
-    return arb_.draft_top2(seq_, token_id, step);
+Top2 SeqBackend::forward_mtp_top2(int32_t token_id, int64_t step, float inv_T) {
+    return arb_.draft_top2(seq_, token_id, step, inv_T);
 }
 
 std::vector<float> SeqBackend::forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) {

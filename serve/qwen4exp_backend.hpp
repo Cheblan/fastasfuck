@@ -63,10 +63,10 @@ public:
     std::vector<float> forward_mtp(int32_t token_id, int64_t step) override {
         return session_->forward_mtp(token_id, step);
     }
-    Top2 forward_mtp_top2(int32_t token_id, int64_t step) override {  // reduced on the GPU, one small copy back
-        const Qwen4ExpSession::MtpTop2 p = session_->forward_mtp_top2(token_id, step);
+    Top2 forward_mtp_top2(int32_t token_id, int64_t step, float inv_T = 1.0f) override {  // reduced on the GPU, one small copy back
+        const Qwen4ExpSession::MtpTop2 p = session_->forward_mtp_top2(token_id, step, inv_T);
         Top2 t;
-        t.best = p.best, t.best_v = p.best_v, t.second_v = p.second_v, t.nan = p.nan;
+        t.best = p.best, t.best_v = p.best_v, t.second_v = p.second_v, t.nan = p.nan, t.p_top1 = p.p_top1;
         return t;
     }
     std::vector<float> forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) override {
@@ -104,24 +104,24 @@ public:
     LogitRows forward_image_prefill(int seq, const std::vector<int32_t> &ids, const PrefillImage &image,
                                     const std::vector<int64_t> &pos3, int64_t n_logits, bool cands,
                                     int64_t n_valid, const LogitMasks *masks = nullptr) override;
-    Top2 forward_mtp_top2(int seq, int32_t token_id, int64_t step) override {
-        const Qwen4ExpSession::MtpTop2 p = session_->forward_mtp_top2_seq(seq, token_id, step);
+    Top2 forward_mtp_top2(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f) override {
+        const Qwen4ExpSession::MtpTop2 p = session_->forward_mtp_top2_seq(seq, token_id, step, inv_T);
         Top2 t;
-        t.best = p.best, t.best_v = p.best_v, t.second_v = p.second_v, t.nan = p.nan;
+        t.best = p.best, t.best_v = p.best_v, t.second_v = p.second_v, t.nan = p.nan, t.p_top1 = p.p_top1;
         return t;
     }
     std::vector<Top2> forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) override {
         std::vector<Qwen4ExpSession::MtpDraftRun> sruns;
         sruns.reserve(runs.size());
         for (const auto &r : runs) {
-            sruns.push_back({r.seq, r.token_id, r.step});
+            sruns.push_back({r.seq, r.token_id, r.step, r.inv_T});
         }
         const std::vector<Qwen4ExpSession::MtpTop2> pres = session_->forward_mtp_top2_batch(sruns);
         std::vector<Top2> out;
         out.reserve(pres.size());
         for (const auto &p : pres) {
             Top2 t;
-            t.best = p.best, t.best_v = p.best_v, t.second_v = p.second_v, t.nan = p.nan;
+            t.best = p.best, t.best_v = p.best_v, t.second_v = p.second_v, t.nan = p.nan, t.p_top1 = p.p_top1;
             out.push_back(t);
         }
         return out;

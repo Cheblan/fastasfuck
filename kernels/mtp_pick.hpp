@@ -22,14 +22,14 @@ struct MtpPick {
     float best_v, second_v;
     uint32_t nan;  // 1 if any logit was NaN (best / values are then meaningless)
     uint32_t err[9];
-    uint32_t pad;
+    float p_top1;  // softmax probability of `best` at temperature 1/inv_T (replaces former 4-byte pad)
     EmbeddingError emb;
 };
 static_assert(sizeof(MtpPick) == 64, "MtpPick is copied as one 64-byte block");
 
-// logits [n] FP32 (1 <= n <= 2^31 - 1); the error words and slot are the forward's device ones (read, not reset);
-// out on the device. One block.
-void mtp_pick(const float *logits, int64_t n, const uint32_t *router_err, const uint32_t *expert_err,
+// logits [n] FP32 (1 <= n <= 2^31 - 1); inv_T scales logit differences inside expf() for p_top1 only;
+// best / best_v / second_v remain untouched. One block.
+void mtp_pick(const float *logits, int64_t n, float inv_T, const uint32_t *router_err, const uint32_t *expert_err,
               const uint32_t *attn_err, const EmbeddingError *emb_err, MtpPick *out, hipStream_t stream);
 
 }  // namespace strix::kernels

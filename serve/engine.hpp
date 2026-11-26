@@ -26,6 +26,7 @@
 #include "serve/token_mask.hpp"
 #include "serve/tokenizer.hpp"
 
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -129,10 +130,20 @@ public:
     }
     // The draft's top2() (serve/sampler.hpp) - what the engine uses of it. The default takes forward_mtp's logits;
     // a backend may reduce them where they are (Qwen4ExpSession::forward_mtp_top2).
-    virtual Top2 forward_mtp_top2(int32_t token_id, int64_t step) {
+    virtual Top2 forward_mtp_top2(int32_t token_id, int64_t step, float inv_T = 1.0f) {
         const std::vector<float> ml = forward_mtp(token_id, step);
         STRIX_CHECK(!ml.empty(), "LmBackend::forward_mtp_top2: the backend's MTP draft (step ", step, ") returned no logits");
-        return top2(ml.data(), (int64_t)ml.size());
+        Top2 t = top2(ml.data(), (int64_t)ml.size());
+        if (!t.nan) {
+            const float eff_inv_T = (inv_T > 0.0f && std::isfinite(inv_T)) ? inv_T : 1.0f;
+            double sum_exp = 0.0;
+            for (float v : ml) {
+                const float diff = (v == t.best_v) ? 0.0f : (v - t.best_v) * eff_inv_T;
+                if (std::isfinite(diff)) sum_exp += std::exp((double)diff);
+            }
+            if (sum_exp > 0.0 && std::isfinite(sum_exp)) t.p_top1 = static_cast<float>(1.0 / sum_exp);
+        }
+        return t;
     }
     // Verifying drafts: a forward whose state changes can be undone (drop) or kept - exactly one of the two before
     // anything else. The default saves / restores snapshot slot kDraftSlot; a backend may do it cheaper.
@@ -213,20 +224,21 @@ public:
         check_seq(seq, "forward_image_prefill");
         return forward_image_prefill(ids, image, pos3, n_logits, cands, n_valid, masks);
     }
-    virtual Top2 forward_mtp_top2(int seq, int32_t token_id, int64_t step) {
+    virtual Top2 forward_mtp_top2(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f) {
         check_seq(seq, "forward_mtp_top2");
-        return forward_mtp_top2(token_id, step);
+        return forward_mtp_top2(token_id, step, inv_T);
     }
     struct MtpDraftRun {
         int seq = 0;
         int32_t token_id = 0;
         int64_t step = 0;
+        float inv_T = 1.0f;
     };
     virtual std::vector<Top2> forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) {
         std::vector<Top2> out;
         out.reserve(runs.size());
         for (const auto &r : runs) {
-            out.push_back(forward_mtp_top2(r.seq, r.token_id, r.step));
+            out.push_back(forward_mtp_top2(r.seq, r.token_id, r.step, r.inv_T));
         }
         return out;
     }

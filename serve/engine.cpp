@@ -1355,6 +1355,7 @@ void Engine::run(Job &job, Slot &sl) {
         float ema_E = 3.2f;
         const bool is_auto_lut = (mtp_cfg.lut_mode == Options::MtpLutMode::Auto);
         const int mtp_regime = OnlineMtpLut::regime_for_temp(req.sampling.temperature);
+        const float mtp_inv_T = (req.sampling.temperature > 1e-6) ? static_cast<float>(1.0 / req.sampling.temperature) : 1.0f;
         for (;;) {
             if (sink.cancelled()) {
                 reason = "cancelled";
@@ -1518,7 +1519,7 @@ void Engine::run(Job &job, Slot &sl) {
                     }
 
                     const auto t_draft_start = std::chrono::steady_clock::now();
-                    const Top2 t = sl.be->forward_mtp_top2(ids.back(), step);
+                    const Top2 t = sl.be->forward_mtp_top2(ids.back(), step, mtp_inv_T);
                     const auto t_draft_end = std::chrono::steady_clock::now();
                     const uint64_t ns_d = std::chrono::duration_cast<std::chrono::nanoseconds>(t_draft_end - t_draft_start).count();
                     g_hw_stats.draft_time_ns.fetch_add(ns_d, std::memory_order_relaxed);
@@ -1537,12 +1538,13 @@ void Engine::run(Job &job, Slot &sl) {
                     }
 
                     const float delta_logits = t.best_v - t.second_v;
+                    const int lut_bin = (t.p_top1 > 0.0f) ? OnlineMtpLut::bin_for_prob(t.p_top1)
+                                                          : OnlineMtpLut::bin_for_delta_logits(delta_logits);
                     if (active_gate == Options::MtpGateRule::Cost) {
                         // Stage 2: Post-draft actual cost check via OnlineMtpLut (auto) or calibrated sigmoid (static)
-                        const int bin = OnlineMtpLut::bin_for_delta_logits(delta_logits);
                         float p_next = 0.5f;
                         if (is_auto_lut) {
-                            p_next = mtp_lut_.cond_prob(mtp_regime, step, bin);
+                            p_next = mtp_lut_.cond_prob(mtp_regime, step, lut_bin);
                         } else {
                             const float p_calib = 1.0f / (1.0f + std::exp(-(mtp_cfg.alpha * delta_logits + mtp_cfg.beta * (float)step + mtp_cfg.bias)));
                             p_next = std::clamp(p_calib, 0.01f, 0.995f);
@@ -1556,7 +1558,7 @@ void Engine::run(Job &job, Slot &sl) {
 
                         ids.push_back(d);
                         if (lut_obs_n < (size_t)kMtpMaxDraft) {
-                            lut_obs[lut_obs_n++] = {static_cast<int>(step), bin};
+                            lut_obs[lut_obs_n++] = {static_cast<int>(step), lut_bin};
                         }
                         P_cum = P_cum_next;
                     } else {
@@ -1568,7 +1570,7 @@ void Engine::run(Job &job, Slot &sl) {
                         if (delta_logits < required_margin) break;
                         ids.push_back(d);
                         if (is_auto_lut && lut_obs_n < (size_t)kMtpMaxDraft) {
-                            lut_obs[lut_obs_n++] = {static_cast<int>(step), OnlineMtpLut::bin_for_delta_logits(delta_logits)};
+                            lut_obs[lut_obs_n++] = {static_cast<int>(step), lut_bin};
                         }
                     }
 

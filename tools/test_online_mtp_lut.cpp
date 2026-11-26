@@ -92,9 +92,18 @@ void test_bernoulli_convergence() {
 void test_regimes_and_bins() {
     STRIX_CHECK(OnlineMtpLut::regime_for_temp(0.0) == 0, "greedy regime");
     STRIX_CHECK(OnlineMtpLut::regime_for_temp(0.3) == 1, "low temp regime");
-    STRIX_CHECK(OnlineMtpLut::regime_for_temp(0.6) == 2, "high temp regime");
+    STRIX_CHECK(OnlineMtpLut::regime_for_temp(0.6) == 2, "mid temp regime");
+    STRIX_CHECK(OnlineMtpLut::regime_for_temp(1.0) == 3, "high temp regime");
 
     int prev_bin = -1;
+    for (float p = 0.0f; p <= 1.0f; p += 0.05f) {
+        const int b = OnlineMtpLut::bin_for_prob(p);
+        STRIX_CHECK(b >= 0 && b < OnlineMtpLut::kBins, "prob bin out of range");
+        STRIX_CHECK(b >= prev_bin, "prob bin mapping must be non-decreasing");
+        prev_bin = b;
+    }
+
+    prev_bin = -1;
     for (float d = 0.0f; d <= 10.0f; d += 0.5f) {
         const int b = OnlineMtpLut::bin_for_delta_logits(d);
         STRIX_CHECK(b >= 0 && b < OnlineMtpLut::kBins, "bin out of range");
@@ -115,6 +124,13 @@ public:
     bool has_mtp() const override { return true; }
     int n_seqs() const override { return n_; }
 
+    std::vector<float> forward_mtp(int32_t token_id, int64_t step) override {
+        (void)token_id, (void)step;
+        std::vector<float> logits(16, 0.0f);
+        logits[1] = 10.0f;
+        for (int i = 2; i < 11; ++i) logits[i] = 9.0f;  // 9 flat runners-up!
+        return logits;
+    }
     std::vector<float> forward(const std::vector<int32_t> &ids, bool want_logits) override {
         return forward(ids, static_cast<int64_t>(want_logits ? 1 : 0));
     }
@@ -132,13 +148,13 @@ public:
         (void)state, (void)n, (void)from;
     }
     std::string state_fingerprint() const override { return "mock"; }
-    Top2 forward_mtp_top2(int seq, int32_t token_id, int64_t step) override {
-        (void)seq, (void)token_id, (void)step;
-        return Top2{1, 5.0f, 1.0f, false};
+    Top2 forward_mtp_top2(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f) override {
+        (void)seq, (void)token_id, (void)step, (void)inv_T;
+        return Top2{1, 5.0f, 1.0f, false, 0.9f};
     }
     std::vector<Top2> forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) override {
         if (sleep_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-        return std::vector<Top2>(runs.size(), Top2{1, 5.0f, 1.0f, false});
+        return std::vector<Top2>(runs.size(), Top2{1, 5.0f, 1.0f, false, 0.9f});
     }
     std::vector<LogitRows> verify_batch(const std::vector<VerifyRun> &runs, bool cands, int64_t n_valid) override {
         (void)cands, (void)n_valid;
@@ -248,6 +264,18 @@ void test_gpu_arbiter_zero_wait_and_buckets() {
         STRIX_CHECK(restored_solo_tau < 8.5f, "switching 4->1 must instantly restore bucket 1 tau, got ",
                     restored_solo_tau);
         arb.set_decoding(0, false);
+    }
+
+    // 3. Verify flat-tail p_top1(inv_T) sensitivity in LmBackend fallback
+    {
+        MockLmBackend be(1);
+        const Top2 t_hot = be.strix::LmBackend::forward_mtp_top2(0, 0, int64_t{0}, 1.0f);
+        const Top2 t_cool = be.strix::LmBackend::forward_mtp_top2(0, 0, int64_t{0}, 1.0f / 0.6f);
+        STRIX_CHECK(t_hot.best == 1 && t_cool.best == 1, "best token invariance");
+        STRIX_CHECK(t_hot.best_v == 10.0f && t_cool.best_v == 10.0f && t_hot.second_v == 9.0f,
+                    "raw logits untouched by inv_T");
+        STRIX_CHECK(t_hot.p_top1 > 0.21f && t_hot.p_top1 < 0.25f, "T=1.0 flat tail p_top1 ~0.23, got ", t_hot.p_top1);
+        STRIX_CHECK(t_cool.p_top1 > 0.35f && t_cool.p_top1 < 0.39f, "T=0.6 flat tail p_top1 ~0.37, got ", t_cool.p_top1);
     }
 }
 

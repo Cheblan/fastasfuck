@@ -136,7 +136,7 @@ bool save_cached_profile(
 // while strictly excluding censored steps (k > accepted, or unverified prefix cuts).
 class OnlineMtpLut {
 public:
-    static constexpr int kRegimes = 3;  // 0: greedy (T <= 1e-6), 1: low (0 < T <= 0.4), 2: high (T > 0.4)
+    static constexpr int kRegimes = 4;  // 0: greedy (T<=1e-6), 1: low (<=0.4), 2: mid (<=0.8), 3: high (>0.8)
     static constexpr int kMaxK = 15;    // draft step positions 0..14 (matching --mtp-draft 1..15)
     static constexpr int kBins = 16;    // confidence bins
     static constexpr float kPriorTrials = 8.0f;
@@ -159,6 +159,7 @@ public:
     void reset();
 
     static int regime_for_temp(double temp);
+    static int bin_for_prob(float p_top1);
     static int bin_for_delta_logits(float delta_logits);
 
     float cond_prob(int regime, int64_t step, int bin) const;

@@ -56,7 +56,7 @@ public:
     // seq's verify, joined into a batch with the other decoding seqs' (see above); returns seq's rows.
     LogitRows verify(int seq, const LmBackend::VerifyRun &run, bool cands, int64_t n_valid);
     // seq's draft, joined into a batch with other decoding seqs'; returns seq's top2.
-    Top2 draft_top2(int seq, int32_t token_id, int64_t step);
+    Top2 draft_top2(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f);
     // seq resets its state: after a failure the first one resets the whole backend; a pending resolution of seq's is
     // dropped first.
     void reset(int seq);
@@ -193,7 +193,7 @@ public:
     void set_lookahead(const std::vector<int32_t> &next_ids) override;
     bool has_mtp() const override { return be().has_mtp(); }
     float mtp_draft_step_ms() const override { return arb_.backend().mtp_draft_step_ms(); }
-    Top2 forward_mtp_top2(int32_t token_id, int64_t step) override;
+    Top2 forward_mtp_top2(int32_t token_id, int64_t step, float inv_T = 1.0f) override;
     std::vector<float> forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) override;
     LogitRows forward_rows(const std::vector<int32_t> &ids, int64_t n_logits, bool cands, int64_t n_valid,
                            const LogitMasks *masks = nullptr) override;
