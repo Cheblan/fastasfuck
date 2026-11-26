@@ -233,6 +233,7 @@ public:
         int32_t token_id = 0;
         int64_t step = 0;
         float inv_T = 1.0f;
+        int64_t n_valid = 0;
     };
     virtual std::vector<Top2> forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) {
         std::vector<Top2> out;
@@ -256,20 +257,21 @@ public:
         float v[kCands];
     };
     virtual bool supports_draft_cands() const { return false; }
-    virtual MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f) {
-        (void)token_id, (void)step, (void)inv_T;
+    virtual MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f, int64_t n_valid = 0) {
+        (void)token_id, (void)step, (void)inv_T, (void)n_valid;
         STRIX_CHECK(false, "LmBackend::forward_mtp_cands: this backend does not return draft candidate rows");
         return {};
     }
-    virtual MtpDraftCands forward_mtp_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f) {
+    virtual MtpDraftCands forward_mtp_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                            int64_t n_valid = 0) {
         check_seq(seq, "forward_mtp_cands");
-        return forward_mtp_cands(token_id, step, inv_T);
+        return forward_mtp_cands(token_id, step, inv_T, n_valid);
     }
     virtual std::vector<MtpDraftCands> forward_mtp_cands_batch(const std::vector<MtpDraftRun> &runs) {
         std::vector<MtpDraftCands> out;
         out.reserve(runs.size());
         for (const auto &r : runs) {
-            out.push_back(forward_mtp_cands(r.seq, r.token_id, r.step, r.inv_T));
+            out.push_back(forward_mtp_cands(r.seq, r.token_id, r.step, r.inv_T, r.n_valid));
         }
         return out;
     }
@@ -741,6 +743,7 @@ public:
     struct MtpRuntimeConfig {
         Options::MtpGateRule gate_rule = Options::MtpGateRule::Cost;
         Options::MtpLutMode lut_mode = Options::MtpLutMode::Auto;
+        Options::MtpSpec speculative = Options::MtpSpec::Auto;
         int64_t draft = 3;
         float margin = 2.5f;
         bool escalating_margin = false;
@@ -757,6 +760,7 @@ public:
         MtpRuntimeConfig cfg;
         cfg.gate_rule = is_greedy ? options_.mtp_gate_rule : options_.sampled_gate;
         cfg.lut_mode = options_.mtp_lut_mode;
+        cfg.speculative = options_.mtp_speculative;
         cfg.draft = options_.mtp_draft;
         cfg.margin = options_.mtp_margin;
         cfg.escalating_margin = options_.mtp_escalating_margin;
@@ -780,6 +784,8 @@ public:
     std::string sampled_gate_str() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.sampled_gate_str(); }
     Options::MtpLutMode mtp_lut_mode() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_lut_mode; }
     std::string mtp_lut_mode_str() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_lut_mode_str(); }
+    Options::MtpSpec mtp_speculative() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_speculative; }
+    std::string mtp_speculative_str() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_speculative_str(); }
     float mtp_lut_step_penalty() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_lut_step_penalty; }
     float mtp_ema_decay() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_ema_decay; }
     void set_mtp_margin(float m) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_margin = m; }
@@ -789,6 +795,7 @@ public:
     void set_mtp_gate_rule(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_mtp_gate_rule(r); }
     void set_sampled_gate(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_sampled_gate(r); }
     void set_mtp_lut_mode(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_mtp_lut_mode(r); }
+    void set_mtp_speculative(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_mtp_speculative(r); }
     void set_mtp_lut_step_penalty(float p) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_lut_step_penalty = p; }
     void set_mtp_ema_decay(float d) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_ema_decay = d; }
     float mtp_alpha() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_alpha; }
@@ -903,6 +910,7 @@ private:
     mutable std::mutex mu_;
     mutable std::mutex mtp_mu_;
     OnlineMtpLut mtp_lut_;
+    OnlineMtpLut mtp_lut_leviathan_{OnlineMtpLut::PriorMode::Leviathan};
     std::condition_variable cv_;
     std::deque<Job> queue_;
     bool stop_ = false;

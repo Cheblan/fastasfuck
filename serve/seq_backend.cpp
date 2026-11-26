@@ -327,10 +327,12 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
     cv_.wait(lock, [&] { return !busy_; });
     std::vector<int> members;
     std::vector<LmBackend::MtpDraftRun> runs;
+    bool any_cands = false;
     for (const auto &[s, d] : pending_drafts_) {
         if (!d.done) {
             members.push_back(s);
             runs.push_back(d.run);
+            any_cands |= d.want_cands;
         }
     }
     if (runs.empty()) return;
@@ -341,10 +343,6 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
     std::vector<LmBackend::MtpDraftCands> cands_results;
     std::exception_ptr err;
     const double t0 = now_s();
-    bool any_cands = false;
-    for (int s : members) {
-        any_cands |= pending_drafts_[s].want_cands;
-    }
     try {
         if (any_cands) {
             // Leviathan: every row gets its candidate window (the greedy members just ignore it).
@@ -458,10 +456,11 @@ Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step, float inv_T
     return done.result;
 }
 
-LmBackend::MtpDraftCands GpuArbiter::draft_cands(int seq, int32_t token_id, int64_t step, float inv_T) {
+LmBackend::MtpDraftCands GpuArbiter::draft_cands(int seq, int32_t token_id, int64_t step, float inv_T,
+                                                 int64_t n_valid) {
     std::unique_lock<std::mutex> lock(mu_);
     check_ok_locked(seq);
-    PendingDraft done = draft_wait_locked(lock, {seq, token_id, step, inv_T}, true);
+    PendingDraft done = draft_wait_locked(lock, {seq, token_id, step, inv_T, n_valid}, true);
     if (done.error) std::rethrow_exception(done.error);
     return done.cands;
 }
@@ -707,8 +706,9 @@ Top2 SeqBackend::forward_mtp_top2(int32_t token_id, int64_t step, float inv_T) {
     return arb_.draft_top2(seq_, token_id, step, inv_T);
 }
 
-LmBackend::MtpDraftCands SeqBackend::forward_mtp_cands(int32_t token_id, int64_t step, float inv_T) {
-    return arb_.draft_cands(seq_, token_id, step, inv_T);
+LmBackend::MtpDraftCands SeqBackend::forward_mtp_cands(int32_t token_id, int64_t step, float inv_T,
+                                                     int64_t n_valid) {
+    return arb_.draft_cands(seq_, token_id, step, inv_T, n_valid);
 }
 
 std::vector<float> SeqBackend::forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) {

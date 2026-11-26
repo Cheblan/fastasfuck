@@ -131,19 +131,21 @@ public:
                       "LmBackend::MtpDraftCands::kCands must match kernels::kLogitCands");
         return session_->has_mtp();
     }
-    MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f) override {
-        const Qwen4ExpSession::MtpCands c = session_->forward_mtp_cands(token_id, step, inv_T);
+    MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                      int64_t n_valid = 0) override {
+        const Qwen4ExpSession::MtpCands c = session_->forward_mtp_cands(token_id, step, inv_T, n_valid);
         return to_draft_cands(c);
     }
-    MtpDraftCands forward_mtp_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f) override {
-        const Qwen4ExpSession::MtpCands c = session_->forward_mtp_cands_seq(seq, token_id, step, inv_T);
+    MtpDraftCands forward_mtp_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                      int64_t n_valid = 0) override {
+        const Qwen4ExpSession::MtpCands c = session_->forward_mtp_cands_seq(seq, token_id, step, inv_T, n_valid);
         return to_draft_cands(c);
     }
     std::vector<MtpDraftCands> forward_mtp_cands_batch(const std::vector<MtpDraftRun> &runs) override {
         std::vector<Qwen4ExpSession::MtpDraftRun> sruns;
         sruns.reserve(runs.size());
         for (const auto &r : runs) {
-            sruns.push_back({r.seq, r.token_id, r.step, r.inv_T});
+            sruns.push_back({r.seq, r.token_id, r.step, r.inv_T, r.n_valid});
         }
         const std::vector<Qwen4ExpSession::MtpCands> pres = session_->forward_mtp_cands_batch(sruns);
         std::vector<MtpDraftCands> out;

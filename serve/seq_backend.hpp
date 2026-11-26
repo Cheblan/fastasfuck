@@ -58,7 +58,8 @@ public:
     // seq's draft, joined into a batch with other decoding seqs'; returns seq's top2.
     Top2 draft_top2(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f);
     // Leviathan's draft through the batch: the same wait, the candidate rows back (PendingDraft::cands).
-    LmBackend::MtpDraftCands draft_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f);
+    LmBackend::MtpDraftCands draft_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                         int64_t n_valid = 0);
     // seq resets its state: after a failure the first one resets the whole backend; a pending resolution of seq's is
     // dropped first.
     void reset(int seq);
@@ -201,7 +202,8 @@ public:
     float mtp_draft_step_ms() const override { return arb_.backend().mtp_draft_step_ms(); }
     Top2 forward_mtp_top2(int32_t token_id, int64_t step, float inv_T = 1.0f) override;
     bool supports_draft_cands() const override { return arb_.backend().supports_draft_cands(); }
-    MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f) override;
+    MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                      int64_t n_valid = 0) override;
     std::vector<float> forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) override;
     LogitRows forward_rows(const std::vector<int32_t> &ids, int64_t n_logits, bool cands, int64_t n_valid,
                            const LogitMasks *masks = nullptr) override;

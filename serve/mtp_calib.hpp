@@ -136,6 +136,11 @@ bool save_cached_profile(
 // while strictly excluding censored steps (k > accepted, or unverified prefix cuts).
 class OnlineMtpLut {
 public:
+    enum class PriorMode {
+        Argmax,
+        Leviathan
+    };
+
     static constexpr int kRegimes = 4;  // 0: greedy (T<=1e-6), 1: low (<=0.4), 2: mid (<=0.8), 3: high (>0.8)
     static constexpr int kMaxK = 15;    // draft step positions 0..14 (matching --mtp-draft 1..15)
     static constexpr int kBins = 16;    // confidence bins
@@ -154,7 +159,7 @@ public:
         int bin = 0;
     };
 
-    OnlineMtpLut();
+    explicit OnlineMtpLut(PriorMode mode = PriorMode::Argmax);
 
     void reset();
 
@@ -171,6 +176,7 @@ public:
 private:
     void recompute_pava_locked(int regime, int step);
 
+    PriorMode prior_mode_ = PriorMode::Argmax;
     mutable std::mutex mu_;
     std::array<std::array<std::array<Cell, kBins>, kMaxK>, kRegimes> cells_{};
     std::array<std::array<std::array<float, kBins>, kMaxK>, kRegimes> prob_mono_{};

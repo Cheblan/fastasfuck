@@ -906,6 +906,7 @@ public:
         int32_t token_id = 0;
         int64_t step = 0;
         float inv_T = 1.0f;
+        int64_t n_valid = 0;
     };
     MtpTop2 forward_mtp_top2(int32_t token_id, int64_t step = 0, float inv_T = 1.0f);
     MtpTop2 forward_mtp_top2_seq(int seq, int32_t token_id, int64_t step = 0, float inv_T = 1.0f);  // the draft's pick on a slot
@@ -921,8 +922,9 @@ public:
         int32_t id[kernels::kLogitCands];
         float v[kernels::kLogitCands];
     };
-    MtpCands forward_mtp_cands(int32_t token_id, int64_t step = 0, float inv_T = 1.0f);
-    MtpCands forward_mtp_cands_seq(int seq, int32_t token_id, int64_t step = 0, float inv_T = 1.0f);
+    MtpCands forward_mtp_cands(int32_t token_id, int64_t step = 0, float inv_T = 1.0f, int64_t n_valid = 0);
+    MtpCands forward_mtp_cands_seq(int seq, int32_t token_id, int64_t step = 0, float inv_T = 1.0f,
+                                   int64_t n_valid = 0);
     std::vector<MtpCands> forward_mtp_cands_batch(const std::vector<MtpDraftRun> &runs);
     // The draft's vocabulary: forward_mtp scores only ids [0, n) (the LM head's first n rows - BPE ids run roughly
     // by frequency) and returns n logits. Default: the whole vocabulary. 1..vocab.

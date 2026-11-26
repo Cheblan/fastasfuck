@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 
 namespace strix {
 
@@ -4002,10 +4003,28 @@ std::vector<Qwen4ExpSession::MtpCands> Qwen4ExpSession::forward_mtp_cands_batch(
     if (runs.empty()) return {};
     const int64_t pick_vocab = mtp_batch_body(runs);
     const int64_t T = (int64_t)runs.size();
-    for (size_t r = 0; r < (size_t)T; ++r) {
-        kernels::logits_topk(logits_.get() + (size_t)r * (size_t)pick_vocab, 1, pick_vocab, pick_vocab,
-                             mtp_batch_cands_.get() + (size_t)r * kernels::kLogitCands,
-                             mtp_batch_cands_nan_.get() + r, cand_ws_.get(), cand_ws_bytes_, stream_);
+    const bool compact = !m_.compact_to_vocab().empty();
+    auto eff_valid_for = [&](const MtpDraftRun &run) {
+        if (compact || run.n_valid <= 0) return pick_vocab;
+        return std::min(pick_vocab, run.n_valid);
+    };
+    const int64_t first_valid = eff_valid_for(runs[0]);
+    bool uniform_valid = true;
+    for (size_t r = 1; r < (size_t)T; ++r) {
+        if (eff_valid_for(runs[r]) != first_valid) {
+            uniform_valid = false;
+            break;
+        }
+    }
+    if (uniform_valid && T <= std::min(max_tokens_, kMaxLogits)) {
+        kernels::logits_topk(logits_.get(), T, pick_vocab, first_valid, mtp_batch_cands_.get(),
+                             mtp_batch_cands_nan_.get(), cand_ws_.get(), cand_ws_bytes_, stream_);
+    } else {
+        for (size_t r = 0; r < (size_t)T; ++r) {
+            kernels::logits_topk(logits_.get() + (size_t)r * (size_t)pick_vocab, 1, pick_vocab,
+                                 eff_valid_for(runs[r]), mtp_batch_cands_.get() + (size_t)r * kernels::kLogitCands,
+                                 mtp_batch_cands_nan_.get() + r, cand_ws_.get(), cand_ws_bytes_, stream_);
+        }
     }
     auto *host_cands = reinterpret_cast<kernels::LogitCand *>(host_batch_cands_.get());
     STRIX_HIP_CHECK(hipMemcpyAsync(host_cands, mtp_batch_cands_.get(),
@@ -4014,12 +4033,17 @@ std::vector<Qwen4ExpSession::MtpCands> Qwen4ExpSession::forward_mtp_cands_batch(
                     "reading batched MTP candidates");
     std::vector<MtpTop2> picks = mtp_batch_reduce(runs, pick_vocab);  // syncs the stream (the picks' copy)
     std::vector<MtpCands> out((size_t)T);
-    const bool compact = !m_.compact_to_vocab().empty();
     for (size_t r = 0; r < (size_t)T; ++r) {
         const MtpTop2 &t = picks[r];
         MtpCands &c = out[r];
         c.best = t.best, c.best_v = t.best_v, c.second_v = t.second_v, c.nan = t.nan, c.p_top1 = t.p_top1;
-        STRIX_CHECK(!c.nan, fn, ": NaN in the MTP draft logits (seq ", runs[r].seq, ", step ", runs[r].step, ")");
+        if (c.nan) {
+            for (int64_t i = 0; i < kernels::kLogitCands; ++i) {
+                c.id[i] = INT32_MAX;
+                c.v[i] = -std::numeric_limits<float>::infinity();
+            }
+            continue;
+        }
         for (int64_t i = 0; i < kernels::kLogitCands; ++i) {
             const kernels::LogitCand &k = host_cands[(size_t)r * kernels::kLogitCands + (size_t)i];
             int32_t id = k.id;
@@ -4034,13 +4058,14 @@ std::vector<Qwen4ExpSession::MtpCands> Qwen4ExpSession::forward_mtp_cands_batch(
     return out;
 }
 
-Qwen4ExpSession::MtpCands Qwen4ExpSession::forward_mtp_cands(int32_t token_id, int64_t step, float inv_T) {
-    return forward_mtp_cands_seq(0, token_id, step, inv_T);
+Qwen4ExpSession::MtpCands Qwen4ExpSession::forward_mtp_cands(int32_t token_id, int64_t step, float inv_T,
+                                                              int64_t n_valid) {
+    return forward_mtp_cands_seq(0, token_id, step, inv_T, n_valid);
 }
 
 Qwen4ExpSession::MtpCands Qwen4ExpSession::forward_mtp_cands_seq(int seq, int32_t token_id, int64_t step,
-                                                                  float inv_T) {
-    std::vector<MtpDraftRun> runs = {{seq, token_id, step, inv_T}};
+                                                                  float inv_T, int64_t n_valid) {
+    std::vector<MtpDraftRun> runs = {{seq, token_id, step, inv_T, n_valid}};
     std::vector<MtpCands> res = forward_mtp_cands_batch(runs);
     STRIX_CHECK(res.size() == 1, "forward_mtp_cands_seq: expected 1 result");
     return res[0];

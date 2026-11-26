@@ -1532,6 +1532,7 @@ void HttpServer::routes() {
         if (req.has_param("gate_rule")) engine_.set_mtp_gate_rule(req.get_param_value("gate_rule"));
         if (req.has_param("sampled_gate")) engine_.set_sampled_gate(req.get_param_value("sampled_gate"));
         if (req.has_param("lut_mode")) engine_.set_mtp_lut_mode(req.get_param_value("lut_mode"));
+        if (req.has_param("speculative")) engine_.set_mtp_speculative(req.get_param_value("speculative"));
         if (req.has_param("lut_step_penalty")) engine_.set_mtp_lut_step_penalty(std::stof(req.get_param_value("lut_step_penalty")));
         if (req.has_param("ema_decay")) engine_.set_mtp_ema_decay(std::stof(req.get_param_value("ema_decay")));
         json::Value b = json::Value::object();
@@ -1543,6 +1544,7 @@ void HttpServer::routes() {
         b.set("mtp_gate_rule", json::Value::string(engine_.mtp_gate_rule_str()));
         b.set("sampled_gate", json::Value::string(engine_.sampled_gate_str()));
         b.set("mtp_lut_mode", json::Value::string(engine_.mtp_lut_mode_str()));
+        b.set("mtp_speculative", json::Value::string(engine_.mtp_speculative_str()));
         b.set("mtp_lut_step_penalty", json::Value::number(engine_.mtp_lut_step_penalty()));
         b.set("mtp_ema_decay", json::Value::number(engine_.mtp_ema_decay()));
         res.set_content(b.dump(), "application/json");
