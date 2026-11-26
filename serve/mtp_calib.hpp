@@ -90,6 +90,7 @@ struct MtpCalibratedProfile {
     bool draft_head_q4 = true;
     std::string mtp_vocab_filter = "all";
     std::string gdn_precision = "half-u";
+    int grouped_min_tokens = 6;
 
     MtpHardwareProfile hw;
     MtpAcceptanceProfile acceptance;
@@ -107,7 +108,8 @@ std::string compute_weights_fingerprint(
     const std::string& gdn_precision,
     uint64_t* out_strix_hash = nullptr,
     uint64_t* out_file_size = nullptr,
-    int64_t* out_mtime = nullptr
+    int64_t* out_mtime = nullptr,
+    int grouped_min_tokens = 6
 );
 
 struct TripletSample {

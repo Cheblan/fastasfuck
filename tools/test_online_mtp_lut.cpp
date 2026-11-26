@@ -304,6 +304,14 @@ void test_leviathan_prior_mode() {
     }
 }
 
+void test_calib_fingerprint_grouped_threshold() {
+    const std::string fp4 = strix::compute_weights_fingerprint(
+        "/tmp/nonexistent-weights.faf", "qwen-test", 4, "en+ru", "half-u", nullptr, nullptr, nullptr, 4);
+    const std::string fp6 = strix::compute_weights_fingerprint(
+        "/tmp/nonexistent-weights.faf", "qwen-test", 4, "en+ru", "half-u", nullptr, nullptr, nullptr, 6);
+    STRIX_CHECK(fp4 != fp6, "calibration fingerprint must change when kGroupedMinTokens changes");
+}
+
 }  // namespace
 
 int main() {
@@ -313,6 +321,7 @@ int main() {
     test_regimes_and_bins();
     test_gpu_arbiter_zero_wait_and_buckets();
     test_leviathan_prior_mode();
+    test_calib_fingerprint_grouped_threshold();
     std::printf("PASS: test_online_mtp_lut\n");
     return 0;
 }

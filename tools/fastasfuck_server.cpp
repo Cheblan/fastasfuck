@@ -459,7 +459,8 @@ int run(int argc, char **argv) {
         const std::string fp = compute_weights_fingerprint(
             weights, cfg.model_id, draft_head_bits,
             settings.text("mtp-vocab-filter"), settings.text("gdn-precision"),
-            &strix_h, &fsize, &fmtime
+            &strix_h, &fsize, &fmtime,
+            static_cast<int>(Qwen4ExpSession::kGroupedMinTokens)
         );
         std::string cache_path = settings.text("mtp-calib-cache-file");
         if (cache_path.empty() || cache_path == "off") {
@@ -661,6 +662,7 @@ int run(int argc, char **argv) {
                 p_save.draft_head_q4 = (draft_head_bits == 4);
                 p_save.mtp_vocab_filter = settings.text("mtp-vocab-filter");
                 p_save.gdn_precision = settings.text("gdn-precision");
+                p_save.grouped_min_tokens = static_cast<int>(Qwen4ExpSession::kGroupedMinTokens);
                 p_save.hw = hw_prof;
                 p_save.acceptance.alpha = eff_alpha;
                 p_save.acceptance.beta = eff_beta;

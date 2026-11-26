@@ -65,7 +65,8 @@ std::string compute_weights_fingerprint(
     const std::string& gdn_precision,
     uint64_t* out_strix_hash,
     uint64_t* out_file_size,
-    int64_t* out_mtime
+    int64_t* out_mtime,
+    int grouped_min_tokens
 ) {
     struct stat st;
     uint64_t file_size = 0;
@@ -94,12 +95,13 @@ std::string compute_weights_fingerprint(
     std::ostringstream ss;
     ss << model_id << "|"
        << weights_path << "|"
-       << "0x" << std::hex << header_index_hash << "|"
+       << "0x" << std::hex << header_index_hash << "|" << std::dec
        << file_size << "|"
        << mtime_ns << "|"
        << "q" << draft_head_bits << "|"
        << mtp_vocab_filter << "|"
-       << gdn_precision;
+       << gdn_precision << "|"
+       << "grp" << grouped_min_tokens;
 
     std::string desc = ss.str();
     uint64_t h1 = strix_hash64(desc.data(), desc.size());
@@ -270,6 +272,10 @@ std::optional<MtpCalibratedProfile> load_cached_profile(
                     res.draft_head_bits = res.draft_head_q4 ? 4 : 8;
                 }
             }
+            const json::Value *v_grp = meta->find("grouped_min_tokens");
+            if (v_grp) {
+                res.grouped_min_tokens = static_cast<int>(v_grp->as_int("grouped_min_tokens"));
+            }
         }
 
         return res;
@@ -309,6 +315,7 @@ bool save_cached_profile(
     meta.set("draft_head_q4", json::Value::boolean(profile.draft_head_q4));
     meta.set("mtp_vocab_filter", json::Value::string(profile.mtp_vocab_filter));
     meta.set("gdn_precision", json::Value::string(profile.gdn_precision));
+    meta.set("grouped_min_tokens", json::Value::integer(profile.grouped_min_tokens));
     p.set("metadata", meta);
 
     json::Value hw = json::Value::object();
@@ -338,7 +345,7 @@ bool save_cached_profile(
 
     profiles.set(profile.fingerprint, p);
     root.set("profiles", profiles);
-    root.set("version", json::Value::integer(1));
+    root.set("version", json::Value::integer(2));
 
     std::ofstream out(cache_file);
     if (!out.is_open()) return false;
