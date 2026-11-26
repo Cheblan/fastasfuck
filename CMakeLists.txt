@@ -279,9 +279,6 @@ target_link_libraries(eval_ppl_kld PRIVATE strix_serve_model)
 add_executable(measure_verify_curve tools/measure_verify_curve.cpp)
 target_link_libraries(measure_verify_curve PRIVATE strix_serve_model)
 
-add_executable(probe_leviathan_mtp tools/probe_leviathan_mtp.cpp)
-target_link_libraries(probe_leviathan_mtp PRIVATE strix_serve_model)
-
 add_executable(test_linear_q6 tools/test_linear_q6.cpp)
 target_link_libraries(test_linear_q6 PRIVATE strix_kernels strix_formats)
 
