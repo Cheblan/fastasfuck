@@ -174,6 +174,11 @@ struct ModeStats {
     double est_time_ms = 0.0;
     std::vector<int64_t> step_trials = std::vector<int64_t>(8, 0);
     std::vector<int64_t> step_hits = std::vector<int64_t>(8, 0);
+    // Step-0 breakdown by trunk/draft p_top1 confidence buckets: [0..0.4, 0.4..0.6, 0.6..0.8, 0.8..1.0]
+    int64_t bin_n[4] = {};
+    double bin_argmax[4] = {};
+    double bin_overlap[4] = {};
+    int64_t bin_real_acc[4] = {};
 };
 
 std::string wrap_chat(const std::string &user_text) {
@@ -267,6 +272,13 @@ ModeStats run_mode(Qwen4ExpSession &session, const Tokenizer &tok,
                 } else {
                     v = sample_dist(p, rng);
                     accept = (v == d);
+                }
+                if (j == 0) {
+                    int b = (q.p_top1 < 0.4) ? 0 : (q.p_top1 < 0.6) ? 1 : (q.p_top1 < 0.8) ? 2 : 3;
+                    ++st.bin_n[b];
+                    st.bin_argmax[b] += prob_of(p, q.top1_id);
+                    st.bin_overlap[b] += overlap_tvd(p, q);
+                    if (accept) ++st.bin_real_acc[b];
                 }
 
                 if (j < (int)st.step_trials.size()) ++st.step_trials[(size_t)j];
@@ -366,7 +378,7 @@ int main(int argc, char **argv) {
     std::string weights_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/weights.faf";
     std::string ngram_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/ngram.table";
     std::string tokenizer_path = "/models/Thinking-Cap-Qwen-3.8-FN-faf/tokenizer.json";
-    int max_gen = 150;
+    int max_gen = 220;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -384,21 +396,19 @@ int main(int argc, char **argv) {
     std::vector<std::string> prompts = {
         wrap_chat("Write a robust, production-ready asynchronous task execution DAG in Python 3.12 using asyncio with cycle detection and cancellation."),
         wrap_chat("State and prove the Riemann-Lebesgue Lemma for functions in L1(R) with full algebraic rigor."),
-        wrap_chat("Проанализируйте понятие zero-copy Unified Memory Architecture на AMD Strix Halo и переведите на академический русский язык.")
+        wrap_chat("Проанализируйте понятие zero-copy Unified Memory Architecture на AMD Strix Halo и переведите на академический русский язык."),
+        wrap_chat("Design an end-to-end scheduling and memory management solution for a 6-slot LLM serving engine on unified LPDDR5X memory.")
     };
     std::vector<std::vector<int32_t>> prompt_tokens;
     for (const auto &s : prompts) prompt_tokens.push_back(tok.encode(s));
 
-    // Build en+ru allowed vocab mask matching production mtp-vocab-filter = en+ru
-    const std::vector<int32_t> en_ru_ids = vocab_filter::filter_vocabulary(
-        tok, vocab_filter::Core | vocab_filter::Latin | vocab_filter::Cyrillic, n_valid);
+    // Build exact en+ru allowed vocab mask matching production mtp-vocab-filter = en+ru
+    const uint32_t en_ru_mask = vocab_filter::parse_filter("en+ru");
+    const std::vector<int32_t> en_ru_ids = vocab_filter::filter_vocabulary(tok, en_ru_mask, n_valid);
     std::vector<uint8_t> allowed_en_ru((size_t)n_valid, 0);
     for (int32_t id : en_ru_ids) allowed_en_ru[(size_t)id] = 1;
 
-    bench_topk_vs_mtp_pick(n_valid);
-    bench_topk_vs_mtp_pick((int64_t)en_ru_ids.size());
-
-    std::cout << "\nLoading model: " << weights_path << " ...\n";
+    std::cout << "Loading model: " << weights_path << " (en+ru kept " << en_ru_ids.size() << " / " << n_valid << ") ...\n";
     Qwen4ExpModel model(weights_path, ngram_path, kernels::Act::BF16, false, 8388608, 1.0f, WeightPlacement::Device);
     model.make_draft_head(model.dims().vocab, /*quantize_q4=*/true, /*G=*/64, /*threads=*/16);
     Qwen4ExpSession session(model, 4096, 1024, PrefillMath::WmmaBf16, /*mtp=*/true, KvFormat::Q8, 1);
@@ -444,6 +454,14 @@ int main(int argc, char **argv) {
         for (int s = 0; s < cfg.k_steps; ++s) {
             double sp = st.step_trials[s] > 0 ? 100.0 * (double)st.step_hits[s] / (double)st.step_trials[s] : 0.0;
             std::cout << std::setw(4) << std::setprecision(0) << sp << "% ";
+        }
+        std::cout << "\n  p_top1 bins (0-0.4 / 0.4-0.6 / 0.6-0.8 / 0.8-1): ";
+        for (int b = 0; b < 4; ++b) {
+            double r_acc = st.bin_n[b] > 0 ? 100.0 * (double)st.bin_real_acc[b] / (double)st.bin_n[b] : 0.0;
+            double a_p = st.bin_n[b] > 0 ? 100.0 * st.bin_argmax[b] / (double)st.bin_n[b] : 0.0;
+            double o_p = st.bin_n[b] > 0 ? 100.0 * st.bin_overlap[b] / (double)st.bin_n[b] : 0.0;
+            std::cout << "[n=" << st.bin_n[b] << " act=" << std::setprecision(0) << r_acc
+                      << "% arg=" << a_p << "% minpq=" << o_p << "%] ";
         }
         std::cout << "\n";
     }
