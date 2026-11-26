@@ -185,4 +185,43 @@ private:
     uint64_t updates_total_ = 0;
 };
 
+// Online counterfactual tuner for Leviathan draft temperature scaling T_draft = scale * T.
+// Tracks expected TVD overlap sum min(p, q_scale) across a discrete scale grid bucketed by
+// (temp_regime, step_group in {0, 1, >=2}), switching only after warmup and hysteresis.
+class OnlineDraftTempTuner {
+public:
+    static constexpr int kRegimes = OnlineMtpLut::kRegimes;
+    static constexpr int kStepGroups = 3;  // 0: step 0, 1: step 1, 2: step >= 2
+    static constexpr int kScales = 5;
+    static constexpr float kScaleGrid[kScales] = {0.55f, 0.70f, 0.85f, 1.00f, 1.15f};
+    static constexpr int kWarmupObs = 28;
+    static constexpr float kHysteresis = 0.005f;
+    static constexpr float kEmaAlpha = 0.03f;
+
+    OnlineDraftTempTuner();
+    void reset();
+
+    static int step_group_for(int64_t step);
+    static int max_scales_for(int regime, int step_group);
+    static float default_scale_for_temp(double temp);
+
+    float scale_for(double temp, int64_t step) const;
+    void update(int regime, int64_t step, const float overlaps[kScales]);
+
+    uint64_t updates_total() const;
+    int active_scale_idx(int regime, int step_group) const;
+    int obs_count(int regime, int step_group) const;
+    float ema_overlap(int regime, int step_group, int scale_idx) const;
+
+private:
+    struct Bucket {
+        float ema[kScales]{};
+        int obs = 0;
+        int active_idx = -1;  // -1 while obs < kWarmupObs -> use default_scale_for_temp
+    };
+    mutable std::mutex mu_;
+    std::array<std::array<Bucket, kStepGroups>, kRegimes> buckets_{};
+    uint64_t updates_total_ = 0;
+};
+
 } // namespace strix

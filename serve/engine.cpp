@@ -377,6 +377,11 @@ EngineStats Engine::stats() const {
         }
     }
     s.mtp_lut_updates_total = mtp_lut_.updates_total() + mtp_lut_leviathan_.updates_total();
+    s.mtp_tuner_updates_total = draft_temp_tuner_.updates_total();
+    for (int sg = 0; sg < OnlineDraftTempTuner::kStepGroups; ++sg) {
+        s.mtp_tuner_scale[0][sg] = draft_temp_tuner_.scale_for(0.6, sg);
+        s.mtp_tuner_scale[1][sg] = draft_temp_tuner_.scale_for(1.0, sg);
+    }
     return s;
 }
 
@@ -1365,11 +1370,11 @@ void Engine::run(Job &job, Slot &sl) {
         const bool leviathan = !is_greedy && cands && sl.be->supports_draft_cands() &&
                                mtp_cfg.speculative != Options::MtpSpec::Off;
         OnlineMtpLut &active_lut = leviathan ? mtp_lut_leviathan_ : mtp_lut_;
-        // Draft temperature: cooler than the target (probe: Td/T = 0.70 best at T = 1.0, 0.85 at T = 0.6 - the
-        // monotone fit below; to be refined against the live OnlineMtpLut curve).
-        const double t_draft =
-            leviathan ? req.sampling.temperature * std::clamp(1.15 - 0.45 * req.sampling.temperature, 0.55, 1.0) : 0.0;
+        // Draft temperature per step: tuned online from counterfactual TVD overlap sum(min(p, q_scale)) over
+        // verified positions; falls back to 1.15 - 0.45*T until a (regime, step_group) bucket finishes warmup.
         std::vector<Sampler::TruncDist> q_store((size_t)std::max<int64_t>(1, mtp_cfg.draft));
+        std::vector<LmBackend::MtpDraftCands> draft_cands_store;
+        if (leviathan) draft_cands_store.resize((size_t)std::max<int64_t>(1, mtp_cfg.draft));
         for (;;) {
             if (sink.cancelled()) {
                 reason = "cancelled";
@@ -1549,11 +1554,16 @@ void Engine::run(Job &job, Slot &sl) {
                     res.mtp_draft_ms += std::chrono::duration<double, std::milli>(t_draft_end - t_draft_start).count();
                     ++res.mtp_draft_calls;
                     STRIX_CHECK(!t.nan, "Engine: NaN in the MTP draft logits (step ", step, ")");
-                    const int32_t d = leviathan
-                                          ? sampler.sample_draft_cands(draft_cands.v, draft_cands.id,
-                                                                         LmBackend::MtpDraftCands::kCands,
-                                                                         draft_cands.nan, t_draft, &q_store[(size_t)step])
-                                          : t.best;
+                    int32_t d = t.best;
+                    if (leviathan) {
+                        const double t_draft_step =
+                            req.sampling.temperature *
+                            static_cast<double>(draft_temp_tuner_.scale_for(req.sampling.temperature, step));
+                        d = sampler.sample_draft_cands(draft_cands.v, draft_cands.id,
+                                                       LmBackend::MtpDraftCands::kCands,
+                                                       draft_cands.nan, t_draft_step, &q_store[(size_t)step]);
+                        draft_cands_store[(size_t)step] = draft_cands;
+                    }
                     if (d == im_end_ || d == eot_) break;
                     // A <tool_call> drafted inside the think block might need the think close fed ahead of it: no draft.
                     if (d == call_begin_ && options_.think_close_on_call && parser.in_reasoning()) break;
@@ -1564,8 +1574,11 @@ void Engine::run(Job &job, Slot &sl) {
                     }
 
                     const float delta_logits = t.best_v - t.second_v;
-                    const int lut_bin = (t.p_top1 > 0.0f) ? OnlineMtpLut::bin_for_prob(t.p_top1)
-                                                          : OnlineMtpLut::bin_for_delta_logits(delta_logits);
+                    const int lut_bin = leviathan
+                        ? OnlineMtpLut::bin_for_prob(sampler.draft_entropy_confidence(
+                              draft_cands.v, draft_cands.id, LmBackend::MtpDraftCands::kCands, draft_cands.nan))
+                        : ((t.p_top1 > 0.0f) ? OnlineMtpLut::bin_for_prob(t.p_top1)
+                                             : OnlineMtpLut::bin_for_delta_logits(delta_logits));
                     if (active_gate == Options::MtpGateRule::Cost) {
                         // Stage 2: Post-draft actual cost check via OnlineMtpLut (auto) or calibrated sigmoid (static)
                         float p_next = 0.5f;
@@ -1623,8 +1636,20 @@ void Engine::run(Job &job, Slot &sl) {
                     bool ended = false, cut = false;
                     for (; j < k; ++j) {
                         guard(ml, j);
-                        v = leviathan ? sampler.verify_leviathan(ml, j, ids[(size_t)j + 1], q_store[(size_t)j])
+                        Sampler::TruncDist p_row;
+                        v = leviathan ? sampler.verify_leviathan(ml, j, ids[(size_t)j + 1], q_store[(size_t)j], &p_row)
                                       : sampler.sample(ml, j);
+                        if (leviathan && !draft_cands_store[(size_t)j].nan) {
+                            float overlaps[OnlineDraftTempTuner::kScales];
+                            for (int s = 0; s < OnlineDraftTempTuner::kScales; ++s) {
+                                const double td_cf = req.sampling.temperature *
+                                                     static_cast<double>(OnlineDraftTempTuner::kScaleGrid[s]);
+                                overlaps[s] = static_cast<float>(sampler.overlap_with_draft_at_temp(
+                                    p_row, draft_cands_store[(size_t)j].v, draft_cands_store[(size_t)j].id,
+                                    LmBackend::MtpDraftCands::kCands, td_cf));
+                            }
+                            draft_temp_tuner_.update(mtp_regime, j, overlaps);
+                        }
                         if (v != ids[(size_t)j + 1]) break;
                         ++res.mtp_accepted_tokens, ++res.completion_tokens;
                         if (so) so->feed(v);

@@ -1670,6 +1670,24 @@ void HttpServer::routes() {
                s.mtp_solo_verify_scale);
         metric("strix_mtp_lut_updates_total", "counter", "Total OnlineMtpLut updates across verified rounds.",
                (double)s.mtp_lut_updates_total);
+        metric("strix_mtp_tuner_updates_total", "counter",
+               "Total counterfactual OnlineDraftTempTuner updates across verified steps.",
+               (double)s.mtp_tuner_updates_total);
+        const char *tuner_regimes[2] = {"mid", "high"};
+        const char *tuner_sgs[3] = {"0", "1", "2+"};
+        for (int ri = 0; ri < 2; ++ri) {
+            for (int sg = 0; sg < 3; ++sg) {
+                const std::string lbl = std::string("{regime=\"") + tuner_regimes[ri] + "\",step_group=\"" +
+                                        tuner_sgs[sg] + "\"}";
+                if (ri == 0 && sg == 0) {
+                    metric("strix_mtp_tuner_scale", "gauge",
+                           "Active Leviathan draft temperature scale factor (T_draft / T) per (regime, step_group).",
+                           (double)s.mtp_tuner_scale[ri][sg], lbl.c_str());
+                } else {
+                    sample("strix_mtp_tuner_scale", lbl.c_str(), (double)s.mtp_tuner_scale[ri][sg]);
+                }
+            }
+        }
         metric("strix_idle_seconds", "gauge",
                "Seconds since the last request finished; 0 while one runs or waits. Batch clients: wait for a gap here.",
                s.idle_seconds);

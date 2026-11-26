@@ -312,6 +312,50 @@ void test_calib_fingerprint_grouped_threshold() {
     STRIX_CHECK(fp4 != fp6, "calibration fingerprint must change when kGroupedMinTokens changes");
 }
 
+void test_online_draft_temp_tuner() {
+    strix::OnlineDraftTempTuner tuner;
+    // Before warmup (kWarmupObs = 28), scale_for must keep the formula fallback (0.70 at T=1.0, 0.88 at T=0.6)
+    const float def_t1 = tuner.scale_for(1.0, 0);
+    const float def_t06 = tuner.scale_for(0.6, 2);
+    STRIX_CHECK(std::abs(def_t1 - 0.70f) < 1e-4f, "T=1.0 fallback expected 0.70, got ", def_t1);
+    STRIX_CHECK(std::abs(def_t06 - 0.88f) < 1e-4f, "T=0.6 fallback expected 0.88, got ", def_t06);
+
+    // Feed 27 observations favoring scale index 0 (0.55) on regime=3, step=0 -> still fallback
+    const float prefer_0[strix::OnlineDraftTempTuner::kScales] = {0.80f, 0.72f, 0.65f, 0.60f, 0.55f};
+    for (int i = 0; i < strix::OnlineDraftTempTuner::kWarmupObs - 1; ++i) {
+        tuner.update(3, 0, prefer_0);
+        STRIX_CHECK(tuner.active_scale_idx(3, 0) == -1, "tuner switched before warmup ended");
+    }
+    // 28th observation selects index 0 (0.55), while step=2 stays on fallback 0.70
+    tuner.update(3, 0, prefer_0);
+    STRIX_CHECK(tuner.active_scale_idx(3, 0) == 0, "warmup should select scale index 0");
+    STRIX_CHECK(std::abs(tuner.scale_for(1.0, 0) - 0.55f) < 1e-5f, "step 0 expected 0.55");
+    STRIX_CHECK(std::abs(tuner.scale_for(1.0, 2) - 0.70f) < 1e-4f, "step 2 should remain at fallback");
+
+    // Hysteresis test: tiny +0.002 edge at index 3 must NOT flip yet; strong edge (>0.005) eventually flips to 3 (1.00)
+    float slight_3[strix::OnlineDraftTempTuner::kScales] = {0.80f, 0.72f, 0.65f, 0.802f, 0.55f};
+    tuner.update(3, 0, slight_3);
+    STRIX_CHECK(tuner.active_scale_idx(3, 0) == 0, "hysteresis failed: jittered on tiny edge");
+    const float strong_3[strix::OnlineDraftTempTuner::kScales] = {0.60f, 0.65f, 0.70f, 0.90f, 0.75f};
+    for (int i = 0; i < 60; ++i) tuner.update(3, 0, strong_3);
+    STRIX_CHECK(tuner.active_scale_idx(3, 0) == 3, "tuner failed to switch to index 3 after strong shift");
+    STRIX_CHECK(std::abs(tuner.scale_for(1.0, 0) - 1.00f) < 1e-5f, "step 0 expected 1.00");
+
+    // Cap check: scale 1.15 (index 4) is allowed at (regime=3, step=0), capped to <= 1.00 (index 3) at mid/step>=1
+    const float prefer_4[strix::OnlineDraftTempTuner::kScales] = {0.50f, 0.60f, 0.70f, 0.80f, 0.95f};
+    for (int i = 0; i < 120; ++i) {
+        tuner.update(3, 0, prefer_4);
+        tuner.update(3, 1, prefer_4);
+        tuner.update(2, 0, prefer_4);
+    }
+    STRIX_CHECK(tuner.active_scale_idx(3, 0) == 4 && std::abs(tuner.scale_for(1.0, 0) - 1.15f) < 1e-5f,
+                "regime=3 step=0 should permit 1.15");
+    STRIX_CHECK(tuner.active_scale_idx(3, 1) == 3 && std::abs(tuner.scale_for(1.0, 1) - 1.00f) < 1e-5f,
+                "regime=3 step=1 must cap at 1.00");
+    STRIX_CHECK(tuner.active_scale_idx(2, 0) == 3 && std::abs(tuner.scale_for(0.6, 0) - 1.00f) < 1e-5f,
+                "regime=2 step=0 must cap at 1.00");
+}
+
 }  // namespace
 
 int main() {
@@ -322,6 +366,7 @@ int main() {
     test_gpu_arbiter_zero_wait_and_buckets();
     test_leviathan_prior_mode();
     test_calib_fingerprint_grouped_threshold();
+    test_online_draft_temp_tuner();
     std::printf("PASS: test_online_mtp_lut\n");
     return 0;
 }

@@ -350,6 +350,47 @@ int main() {
         std::printf("%-28s ok (%lld mixed batches)\n", "GpuArbiter mixed draft",
                     (long long)be.cands_batches.load());
     }
+    // 14. Entropy confidence (evaluated at request T) and counterfactual overlap.
+    {
+        Sampler s20(SamplingParams{1.0, 20, 1.0, 7}, 248320);
+        // Sharp logit peak -> confidence near 1.0
+        std::vector<float> v_sharp = ramp(kCands, 0.0, 1.0);
+        v_sharp[0] = 30.0f;
+        const std::vector<int32_t> id20 = ids_from(kCands, 100);
+        const float u_sharp = s20.draft_entropy_confidence(v_sharp.data(), id20.data(), kCands, false);
+        STRIX_CHECK(u_sharp > 0.99f, "sharp peak entropy conf expected > 0.99, got ", u_sharp);
+
+        // 2-way fork (0.50 / 0.50) vs smeared tail (0.50 + 19 equal tails) at identical p_top1 = 0.50
+        std::vector<float> v_fork(kCands, -30.0f);
+        v_fork[0] = 10.0f;
+        v_fork[1] = 10.0f;
+        std::vector<float> v_smear(kCands, static_cast<float>(10.0 - std::log(19.0)));
+        v_smear[0] = 10.0f;
+        const float u_fork = s20.draft_entropy_confidence(v_fork.data(), id20.data(), kCands, false);
+        const float u_smear = s20.draft_entropy_confidence(v_smear.data(), id20.data(), kCands, false);
+        STRIX_CHECK(std::abs(u_fork - 0.50f) < 0.01f, "2-way fork exp(-H) expected 0.50, got ", u_fork);
+        STRIX_CHECK(u_smear > 0.09f && u_smear < 0.14f, "smeared tail exp(-H) expected ~0.115, got ", u_smear);
+        STRIX_CHECK(u_fork > u_smear + 0.35f, "exp(-H) must separate 2-way fork from smeared tail");
+
+        // Uniform distribution over 20 -> 1/20 = 0.05; top_k=1 -> 1.0
+        std::vector<float> v_unif(kCands, 5.0f);
+        const float u_unif = s20.draft_entropy_confidence(v_unif.data(), id20.data(), kCands, false);
+        STRIX_CHECK(std::abs(u_unif - 0.05f) < 0.01f, "uniform exp(-H) expected 0.05, got ", u_unif);
+        Sampler s1(SamplingParams{1.0, 1, 0.95, 7}, 248320);
+        STRIX_CHECK(s1.draft_entropy_confidence(v_unif.data(), id20.data(), kCands, false) == 1.0f,
+                    "top_k=1 must return 1.0");
+
+        // verify_leviathan out_p + counterfactual overlap invariance
+        Sampler::TruncDist p_row, q;
+        const LogitRows tgt = cand_row(v_fork, id20);
+        const int32_t d = s20.sample_draft_cands(v_fork.data(), id20.data(), kCands, false, 0.7, &q);
+        (void)s20.verify_leviathan(tgt, 0, d, q, &p_row);
+        const double ov_same = s20.overlap_with_draft_at_temp(p_row, v_fork.data(), id20.data(), kCands, 1.0);
+        const double ov_smear = s20.overlap_with_draft_at_temp(p_row, v_smear.data(), id20.data(), kCands, 1.0);
+        STRIX_CHECK(std::abs(ov_same - 1.0) < 1e-9, "exact fork self-overlap expected 1.0, got ", ov_same);
+        STRIX_CHECK(ov_smear < ov_same - 0.3, "smeared overlap expected noticeably lower than exact fork");
+        std::printf("%-28s ok (fork=%.2f vs smear=%.2f)\n", "entropy conf + cf overlap", u_fork, u_smear);
+    }
     std::printf("test_leviathan_sampler: all pass\n");
     return 0;
 }
