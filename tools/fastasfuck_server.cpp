@@ -198,6 +198,9 @@ int run(int argc, char **argv) {
     const std::string mtp_lut_mode = settings.text("mtp-lut-mode");
     STRIX_CHECK(mtp_lut_mode == "auto" || mtp_lut_mode == "static",
                 "fastasfuck_server: --mtp-lut-mode '", mtp_lut_mode, "', expected auto or static");
+    const std::string mtp_speculative = settings.text("mtp-speculative");
+    STRIX_CHECK(mtp_speculative == "auto" || mtp_speculative == "on" || mtp_speculative == "off",
+                "fastasfuck_server: --mtp-speculative '", mtp_speculative, "', expected auto, on or off");
     const float mtp_lut_step_penalty = (float)settings.number("mtp-lut-step-penalty");
     const float mtp_ema_decay = (float)settings.number("mtp-ema-decay");
     const int64_t ngram_cache_rows = settings.integer("ngram-cache-rows");
@@ -682,11 +685,13 @@ int run(int argc, char **argv) {
     eng_opts.set_mtp_gate_rule(mtp_gate_rule);
     eng_opts.set_sampled_gate(sampled_gate);
     eng_opts.set_mtp_lut_mode(mtp_lut_mode);
+    eng_opts.set_mtp_speculative(mtp_speculative);
     eng_opts.mtp_lut_step_penalty = mtp_lut_step_penalty;
     eng_opts.mtp_ema_decay = mtp_ema_decay;
     slog(LogLevel::Info, "startup: MTP gate rule greedy=%s, sampled=%s, lut_mode=%s (step_penalty=%.3f, ema_decay=%.2f)",
          eng_opts.mtp_gate_rule_str().c_str(), eng_opts.sampled_gate_str().c_str(),
          eng_opts.mtp_lut_mode_str().c_str(), eng_opts.mtp_lut_step_penalty, eng_opts.mtp_ema_decay);
+    slog(LogLevel::Info, "startup: MTP speculative sampling (T > 0): %s", eng_opts.mtp_speculative_str().c_str());
     eng_opts.think_nudge = think_nudge;
     eng_opts.think_nudge_policy = nudge_policy;
     eng_opts.think_nudge_wording = nudge_wording;

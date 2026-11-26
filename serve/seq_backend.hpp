@@ -57,6 +57,9 @@ public:
     LogitRows verify(int seq, const LmBackend::VerifyRun &run, bool cands, int64_t n_valid);
     // seq's draft, joined into a batch with other decoding seqs'; returns seq's top2.
     Top2 draft_top2(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f);
+    // Leviathan's draft through the batch: the same wait, the candidate rows back (PendingDraft::cands).
+    LmBackend::MtpDraftCands draft_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                         int64_t n_valid = 0);
     // seq resets its state: after a failure the first one resets the whole backend; a pending resolution of seq's is
     // dropped first.
     void reset(int seq);
@@ -114,10 +117,14 @@ private:
         LmBackend::MtpDraftRun run;
         double since = 0;
         bool done = false;
+        bool want_cands = false;  // Leviathan: fill cands too (the batch runs forward_mtp_cands_batch)
         Top2 result;
+        LmBackend::MtpDraftCands cands;
         std::exception_ptr error;
     };
     void check_ok_locked(int seq) const;
+    // The draft_top2 / draft_cands wait: register the run, join the next batch, return the finished record.
+    PendingDraft draft_wait_locked(std::unique_lock<std::mutex> &lock, LmBackend::MtpDraftRun run, bool want_cands);
     bool poisoned_locked(int seq) const;  // a failure since seq's last reset (check_ok_locked's condition, inverted)
     void fail_locked();  // a call failed with the backend failed(): every seq refuses until its reset
     bool can_run_locked(int seq, Kind kind) const;
@@ -194,6 +201,9 @@ public:
     bool has_mtp() const override { return be().has_mtp(); }
     float mtp_draft_step_ms() const override { return arb_.backend().mtp_draft_step_ms(); }
     Top2 forward_mtp_top2(int32_t token_id, int64_t step, float inv_T = 1.0f) override;
+    bool supports_draft_cands() const override { return arb_.backend().supports_draft_cands(); }
+    MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                      int64_t n_valid = 0) override;
     std::vector<float> forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) override;
     LogitRows forward_rows(const std::vector<int32_t> &ids, int64_t n_logits, bool cands, int64_t n_valid,
                            const LogitMasks *masks = nullptr) override;

@@ -906,10 +906,26 @@ public:
         int32_t token_id = 0;
         int64_t step = 0;
         float inv_T = 1.0f;
+        int64_t n_valid = 0;
     };
     MtpTop2 forward_mtp_top2(int32_t token_id, int64_t step = 0, float inv_T = 1.0f);
     MtpTop2 forward_mtp_top2_seq(int seq, int32_t token_id, int64_t step = 0, float inv_T = 1.0f);  // the draft's pick on a slot
     std::vector<MtpTop2> forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs);
+    // forward_mtp_top2 plus each row's top kernels::kLogitCands candidates (kernels/logits_topk): the raw logits of
+    // Leviathan's draft (serve/sampler.hpp sample_draft_cands). best / p_top1 still come from mtp_pick; the candidate
+    // ids are vocab-remapped (compact draft head) like best. Same state effects as forward_mtp_top2_batch.
+    struct MtpCands {
+        int32_t best = 0;
+        float best_v = 0, second_v = 0;
+        bool nan = false;
+        float p_top1 = 0.0f;
+        int32_t id[kernels::kLogitCands];
+        float v[kernels::kLogitCands];
+    };
+    MtpCands forward_mtp_cands(int32_t token_id, int64_t step = 0, float inv_T = 1.0f, int64_t n_valid = 0);
+    MtpCands forward_mtp_cands_seq(int seq, int32_t token_id, int64_t step = 0, float inv_T = 1.0f,
+                                   int64_t n_valid = 0);
+    std::vector<MtpCands> forward_mtp_cands_batch(const std::vector<MtpDraftRun> &runs);
     // The draft's vocabulary: forward_mtp scores only ids [0, n) (the LM head's first n rows - BPE ids run roughly
     // by frequency) and returns n logits. Default: the whole vocabulary. 1..vocab.
     void set_mtp_vocab(int64_t n);
@@ -984,10 +1000,18 @@ private:
     // stream_; broken_ set until the caller's read-back succeeds, which then calls mtp_done(seq, step)).
     void run_mtp(int seq, int32_t token_id, int64_t step);
     void mtp_done(int seq, int64_t step);
+    // forward_mtp_top2_batch / forward_mtp_cands_batch's shared body: steps 1-11 - the batched head's layer and the
+    // LM head's logits into logits_ [T, pick_vocab]; returns pick_vocab.
+    int64_t mtp_batch_body(const std::vector<MtpDraftRun> &runs);
+    // mtp_pick per row + one host copy: the batch's MtpTop2 (vocab-remapped, mtp_done called).
+    std::vector<MtpTop2> mtp_batch_reduce(const std::vector<MtpDraftRun> &runs, int64_t pick_vocab);
     DeviceBuffer<uint8_t> mtp_pick_;  // kernels::MtpPick on the device (allocated on the first forward_mtp_top2)
     DeviceBuffer<kernels::MtpPick> mtp_batch_picks_;
     PinnedHostBuffer host_batch_picks_;
     PinnedHostBuffer host_batch_ids_;
+    DeviceBuffer<kernels::LogitCand> mtp_batch_cands_;   // [n_slots, kLogitCands] (forward_mtp_cands_batch)
+    DeviceBuffer<uint32_t> mtp_batch_cands_nan_;
+    PinnedHostBuffer host_batch_cands_;
     // Grouped experts for multi-token forwards (kernels/moe_grouped): the route grouping and combine's FP32
     // per-slot dots. Allocated when max_tokens reaches kGroupedMinTokens.
     // QSA selection past dense_key_limit(): scores [max_tokens, cap_blocks] F32, the kept blocks [max_tokens,

@@ -346,7 +346,7 @@ bool save_cached_profile(
     return true;
 }
 
-OnlineMtpLut::OnlineMtpLut() {
+OnlineMtpLut::OnlineMtpLut(PriorMode mode) : prior_mode_(mode) {
     reset();
 }
 
@@ -358,7 +358,9 @@ void OnlineMtpLut::reset() {
             const float step_decay = std::pow(0.95f, static_cast<float>(k));
             for (int b = 0; b < kBins; ++b) {
                 const float bin_mid = (static_cast<float>(b) + 0.5f) / static_cast<float>(kBins);
-                const float p0 = std::clamp(bin_mid * step_decay * kRegimeScale[r], 0.05f, 0.98f);
+                const float p0 = (prior_mode_ == PriorMode::Leviathan)
+                    ? std::clamp((0.55f + 0.40f * bin_mid) * step_decay, 0.15f, 0.98f)
+                    : std::clamp(bin_mid * step_decay * kRegimeScale[r], 0.05f, 0.98f);
                 cells_[r][k][b].hits = kPriorTrials * p0;
                 cells_[r][k][b].trials = kPriorTrials;
             }

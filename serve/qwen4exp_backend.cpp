@@ -302,6 +302,13 @@ LogitRows Qwen4ExpBackend::forward_image_prefill(int seq, const std::vector<int3
     return candidate_rows(n_logits);
 }
 
+LmBackend::MtpDraftCands Qwen4ExpBackend::to_draft_cands(const Qwen4ExpSession::MtpCands &c) {
+    MtpDraftCands o;
+    o.best = c.best, o.best_v = c.best_v, o.second_v = c.second_v, o.nan = c.nan, o.p_top1 = c.p_top1;
+    for (int64_t i = 0; i < MtpDraftCands::kCands; ++i) o.id[i] = c.id[i], o.v[i] = c.v[i];
+    return o;
+}
+
 LogitRows Qwen4ExpBackend::candidate_rows(int64_t rows) const {
     const Qwen4ExpSession::Candidates &c = session_->candidates();
     constexpr int64_t K = kernels::kLogitCands;

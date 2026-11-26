@@ -126,6 +126,35 @@ public:
         }
         return out;
     }
+    bool supports_draft_cands() const override {
+        static_assert(kernels::kLogitCands == MtpDraftCands::kCands,
+                      "LmBackend::MtpDraftCands::kCands must match kernels::kLogitCands");
+        return session_->has_mtp();
+    }
+    MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                      int64_t n_valid = 0) override {
+        const Qwen4ExpSession::MtpCands c = session_->forward_mtp_cands(token_id, step, inv_T, n_valid);
+        return to_draft_cands(c);
+    }
+    MtpDraftCands forward_mtp_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f,
+                                      int64_t n_valid = 0) override {
+        const Qwen4ExpSession::MtpCands c = session_->forward_mtp_cands_seq(seq, token_id, step, inv_T, n_valid);
+        return to_draft_cands(c);
+    }
+    std::vector<MtpDraftCands> forward_mtp_cands_batch(const std::vector<MtpDraftRun> &runs) override {
+        std::vector<Qwen4ExpSession::MtpDraftRun> sruns;
+        sruns.reserve(runs.size());
+        for (const auto &r : runs) {
+            sruns.push_back({r.seq, r.token_id, r.step, r.inv_T, r.n_valid});
+        }
+        const std::vector<Qwen4ExpSession::MtpCands> pres = session_->forward_mtp_cands_batch(sruns);
+        std::vector<MtpDraftCands> out;
+        out.reserve(pres.size());
+        for (const auto &c : pres) {
+            out.push_back(to_draft_cands(c));
+        }
+        return out;
+    }
     void prefetch_ple(int seq, const std::vector<int32_t> &ids, int64_t first) override {
         session_->prefetch_ple(seq, ids, first);
     }
@@ -185,6 +214,7 @@ public:
 
 private:
     LogitRows candidate_rows(int64_t rows) const;  // session_->candidates() of the last forward, checked
+    static MtpDraftCands to_draft_cands(const Qwen4ExpSession::MtpCands &c);  // session's cands -> LmBackend's
     // A batch's per-run masks as one [rows, words] set for want_candidates (runs without masks: every id allowed),
     // no bits when no run has any; and every run's logit bias as kernel entries over its rows (bias_out).
     LogitMasks batch_masks(const std::vector<VerifyRun> &runs, std::vector<kernels::LogitBiasEntry> &bias_out) const;

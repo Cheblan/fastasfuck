@@ -103,6 +103,24 @@ public:
     // the same row masked in full do.
     int32_t sample_candidates(const float *v, const int32_t *id, int64_t m, bool nan, float *out_margin = nullptr);
 
+    // A top-k/top-p truncated distribution over candidate ids: the renormalized softmax sample() draws from, in
+    // candidate order, summing to 1. Leviathan speculative sampling (Leviathan et al. 2023) needs both sides:
+    // q from the MTP head's candidates, p from a verify row.
+    struct TruncDist {
+        std::vector<int32_t> id;
+        std::vector<double> p;
+    };
+    // Sample d ~ q from a candidate row at `temp` - the draft temperature, which may differ from the request's -
+    // putting q into *q. The same candidate checks as sample_candidates; requires takes_candidates() and temp > 0.
+    int32_t sample_draft_cands(const float *v, const int32_t *id, int64_t m, bool nan, double temp, TruncDist *q);
+    // Leviathan's verify step for one draft token d proposed with distribution q (from sample_draft_cands): accept d
+    // with probability min(1, p(d)/q(d)), p = row r's distribution at the request's temperature - the row as the
+    // sampler takes it, after any guard/mask, exactly what sample() would draw from; on rejection draw from
+    // norm(max(0, p - q)). By the speculative-sampling identity the output distribution equals sample()'s for any q,
+    // so the request's sampler contract holds whatever the draft head does. Requires takes_candidates(), candidate
+    // rows and temperature > 0; d must have q(d) > 0.
+    int32_t verify_leviathan(const LogitRows &l, int64_t r, int32_t d, const TruncDist &q);
+
 private:
     SamplingParams p_;
     int64_t n_valid_;
@@ -113,6 +131,9 @@ private:
     int32_t sample_all(const float *logits, float *out_margin);  // top_k off
     int32_t sample_large_k(const float *logits, int64_t k, float *out_margin);
     int32_t draw_from_candidates(int64_t k);
+    // The top-k/top-p truncated distribution over a candidate row at `temp` (no draw): softmax over the row's
+    // candidates, then the top-p prefix, renormalized. Padding candidates (-inf, INT32_MAX) carry no probability.
+    TruncDist trunc_dist_from_cands(const float *v, const int32_t *id, int64_t m, double temp) const;
 };
 
 }  // namespace strix

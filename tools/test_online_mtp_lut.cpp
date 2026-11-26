@@ -279,6 +279,31 @@ void test_gpu_arbiter_zero_wait_and_buckets() {
     }
 }
 
+void test_leviathan_prior_mode() {
+    OnlineMtpLut levi(OnlineMtpLut::PriorMode::Leviathan);
+    OnlineMtpLut argmax(OnlineMtpLut::PriorMode::Argmax);
+
+    // Flat <think> bins (p_top1 < 0.50, r = 3, k = 0) must start optimistic under Leviathan so the cost gate
+    // allows drafting instead of starving at p0 <= 0.375, while Argmax keeps its conservative prior.
+    STRIX_CHECK(argmax.cond_prob(3, 0, 0) < 0.10f, "argmax prior bin 0 should stay conservative");
+    STRIX_CHECK(levi.cond_prob(3, 0, 0) > 0.55f, "leviathan prior bin 0 expected > 0.55, got ",
+                levi.cond_prob(3, 0, 0));
+    STRIX_CHECK(levi.cond_prob(3, 0, 7) > 0.70f, "leviathan prior bin 7 expected > 0.70, got ",
+                levi.cond_prob(3, 0, 7));
+
+    // Repeated rejects on bin 0 must still calibrate Leviathan downward while maintaining PAVA monotonicity.
+    OnlineMtpLut::DraftObs obs[1] = {{0, 0}};
+    for (int i = 0; i < 200; ++i) {
+        levi.update(3, obs, 1, /*accepted=*/0, /*ended_or_cut=*/false);
+    }
+    STRIX_CHECK(levi.cond_prob(3, 0, 0) < 0.40f, "leviathan bin 0 failed to adapt down after rejects: ",
+                levi.cond_prob(3, 0, 0));
+    for (int b = 1; b < OnlineMtpLut::kBins; ++b) {
+        STRIX_CHECK(levi.cond_prob(3, 0, b) + 1e-6f >= levi.cond_prob(3, 0, b - 1),
+                    "leviathan PAVA monotonicity violated at bin ", b);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -287,6 +312,7 @@ int main() {
     test_bernoulli_convergence();
     test_regimes_and_bins();
     test_gpu_arbiter_zero_wait_and_buckets();
+    test_leviathan_prior_mode();
     std::printf("PASS: test_online_mtp_lut\n");
     return 0;
 }

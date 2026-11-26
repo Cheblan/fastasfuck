@@ -327,10 +327,12 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
     cv_.wait(lock, [&] { return !busy_; });
     std::vector<int> members;
     std::vector<LmBackend::MtpDraftRun> runs;
+    bool any_cands = false;
     for (const auto &[s, d] : pending_drafts_) {
         if (!d.done) {
             members.push_back(s);
             runs.push_back(d.run);
+            any_cands |= d.want_cands;
         }
     }
     if (runs.empty()) return;
@@ -338,11 +340,25 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
     lock.unlock();
 
     std::vector<Top2> results;
+    std::vector<LmBackend::MtpDraftCands> cands_results;
     std::exception_ptr err;
     const double t0 = now_s();
     try {
-        results = be_.forward_mtp_top2_batch(runs);
-        STRIX_CHECK(results.size() == runs.size(), "GpuArbiter: forward_mtp_top2_batch returned ",
+        if (any_cands) {
+            // Leviathan: every row gets its candidate window (the greedy members just ignore it).
+            cands_results = be_.forward_mtp_cands_batch(runs);
+            STRIX_CHECK(cands_results.size() == runs.size(), "GpuArbiter: forward_mtp_cands_batch returned ",
+                        cands_results.size(), " results for ", runs.size(), " runs");
+            results.reserve(cands_results.size());
+            for (const auto &c : cands_results) {
+                Top2 t;
+                t.best = c.best, t.best_v = c.best_v, t.second_v = c.second_v, t.nan = c.nan, t.p_top1 = c.p_top1;
+                results.push_back(t);
+            }
+        } else {
+            results = be_.forward_mtp_top2_batch(runs);
+        }
+        STRIX_CHECK(results.size() == runs.size(), "GpuArbiter: the batched draft returned ",
                     results.size(), " results for ", runs.size(), " runs");
     } catch (...) {
         err = std::current_exception();
@@ -395,18 +411,22 @@ void GpuArbiter::run_draft_batch(std::unique_lock<std::mutex> &lock) {
             PendingDraft &d = pending_drafts_[members[i]];
             d.done = true;
             if (err) d.error = err;
-            else d.result = results[i];
+            else {
+                d.result = results[i];
+                if (d.want_cands) d.cands = cands_results[i];
+            }
         }
     }
     cv_.notify_all();
 }
 
-Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step, float inv_T) {
-    std::unique_lock<std::mutex> lock(mu_);
-    check_ok_locked(seq);
+GpuArbiter::PendingDraft GpuArbiter::draft_wait_locked(std::unique_lock<std::mutex> &lock,
+                                                       LmBackend::MtpDraftRun run, bool want_cands) {
+    const int seq = run.seq;
     STRIX_CHECK(!pending_drafts_.count(seq), "GpuArbiter: seq ", seq, " drafts again before previous draft finished");
     PendingDraft &me = pending_drafts_[seq];
-    me.run = {seq, token_id, step, inv_T};
+    me.run = run;
+    me.want_cands = want_cands;
     me.since = now_s();
     me.done = false;
     cv_.notify_all();
@@ -425,8 +445,24 @@ Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step, float inv_T
     }
     PendingDraft done = std::move(me);
     pending_drafts_.erase(seq);
+    return done;
+}
+
+Top2 GpuArbiter::draft_top2(int seq, int32_t token_id, int64_t step, float inv_T) {
+    std::unique_lock<std::mutex> lock(mu_);
+    check_ok_locked(seq);
+    PendingDraft done = draft_wait_locked(lock, {seq, token_id, step, inv_T}, false);
     if (done.error) std::rethrow_exception(done.error);
     return done.result;
+}
+
+LmBackend::MtpDraftCands GpuArbiter::draft_cands(int seq, int32_t token_id, int64_t step, float inv_T,
+                                                 int64_t n_valid) {
+    std::unique_lock<std::mutex> lock(mu_);
+    check_ok_locked(seq);
+    PendingDraft done = draft_wait_locked(lock, {seq, token_id, step, inv_T, n_valid}, true);
+    if (done.error) std::rethrow_exception(done.error);
+    return done.cands;
 }
 
 LogitRows GpuArbiter::verify(int seq, const LmBackend::VerifyRun &run, bool cands, int64_t n_valid) {
@@ -668,6 +704,11 @@ void SeqBackend::set_lookahead(const std::vector<int32_t> &next_ids) {
 
 Top2 SeqBackend::forward_mtp_top2(int32_t token_id, int64_t step, float inv_T) {
     return arb_.draft_top2(seq_, token_id, step, inv_T);
+}
+
+LmBackend::MtpDraftCands SeqBackend::forward_mtp_cands(int32_t token_id, int64_t step, float inv_T,
+                                                     int64_t n_valid) {
+    return arb_.draft_cands(seq_, token_id, step, inv_T, n_valid);
 }
 
 std::vector<float> SeqBackend::forward_verify(const std::vector<int32_t> &ids, int64_t n_logits) {

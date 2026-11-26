@@ -376,7 +376,7 @@ EngineStats Engine::stats() const {
             s.mtp_solo_verify_scale = (double)arbiter_->bucket_scale_verify(1);
         }
     }
-    s.mtp_lut_updates_total = mtp_lut_.updates_total();
+    s.mtp_lut_updates_total = mtp_lut_.updates_total() + mtp_lut_leviathan_.updates_total();
     return s;
 }
 
@@ -1356,6 +1356,20 @@ void Engine::run(Job &job, Slot &sl) {
         const bool is_auto_lut = (mtp_cfg.lut_mode == Options::MtpLutMode::Auto);
         const int mtp_regime = OnlineMtpLut::regime_for_temp(req.sampling.temperature);
         const float mtp_inv_T = (req.sampling.temperature > 1e-6) ? static_cast<float>(1.0 / req.sampling.temperature) : 1.0f;
+        // Leviathan speculative sampling (Leviathan et al. 2023) at T > 0: the draft is sampled from the head's own
+        // truncated distribution q (at a cooler T_draft - on flat <think> forks an argmax draft the sampler would not
+        // pick is rejected ~60% of the time, a q-drawn one accepts at 1 - TVD(p, q)), and the verify accepts each
+        // draft with probability min(1, p/q), resampling from norm(max(0, p - q)) on a reject - exact to the
+        // request's sampler for any q (serve/sampler.hpp verify_leviathan). Greedy (T = 0) never enters it: the
+        // bit-identity path is untouched. Needs candidate rows (top_k 1..20) and a backend that returns them.
+        const bool leviathan = !is_greedy && cands && sl.be->supports_draft_cands() &&
+                               mtp_cfg.speculative != Options::MtpSpec::Off;
+        OnlineMtpLut &active_lut = leviathan ? mtp_lut_leviathan_ : mtp_lut_;
+        // Draft temperature: cooler than the target (probe: Td/T = 0.70 best at T = 1.0, 0.85 at T = 0.6 - the
+        // monotone fit below; to be refined against the live OnlineMtpLut curve).
+        const double t_draft =
+            leviathan ? req.sampling.temperature * std::clamp(1.15 - 0.45 * req.sampling.temperature, 0.55, 1.0) : 0.0;
+        std::vector<Sampler::TruncDist> q_store((size_t)std::max<int64_t>(1, mtp_cfg.draft));
         for (;;) {
             if (sink.cancelled()) {
                 reason = "cancelled";
@@ -1519,7 +1533,15 @@ void Engine::run(Job &job, Slot &sl) {
                     }
 
                     const auto t_draft_start = std::chrono::steady_clock::now();
-                    const Top2 t = sl.be->forward_mtp_top2(ids.back(), step, mtp_inv_T);
+                    Top2 t;
+                    LmBackend::MtpDraftCands draft_cands;
+                    if (leviathan) {
+                        draft_cands = sl.be->forward_mtp_cands(ids.back(), step, mtp_inv_T, n_valid);
+                        t.best = draft_cands.best, t.best_v = draft_cands.best_v, t.second_v = draft_cands.second_v,
+                        t.nan = draft_cands.nan, t.p_top1 = draft_cands.p_top1;
+                    } else {
+                        t = sl.be->forward_mtp_top2(ids.back(), step, mtp_inv_T);
+                    }
                     const auto t_draft_end = std::chrono::steady_clock::now();
                     const uint64_t ns_d = std::chrono::duration_cast<std::chrono::nanoseconds>(t_draft_end - t_draft_start).count();
                     g_hw_stats.draft_time_ns.fetch_add(ns_d, std::memory_order_relaxed);
@@ -1527,7 +1549,11 @@ void Engine::run(Job &job, Slot &sl) {
                     res.mtp_draft_ms += std::chrono::duration<double, std::milli>(t_draft_end - t_draft_start).count();
                     ++res.mtp_draft_calls;
                     STRIX_CHECK(!t.nan, "Engine: NaN in the MTP draft logits (step ", step, ")");
-                    const int32_t d = t.best;
+                    const int32_t d = leviathan
+                                          ? sampler.sample_draft_cands(draft_cands.v, draft_cands.id,
+                                                                         LmBackend::MtpDraftCands::kCands,
+                                                                         draft_cands.nan, t_draft, &q_store[(size_t)step])
+                                          : t.best;
                     if (d == im_end_ || d == eot_) break;
                     // A <tool_call> drafted inside the think block might need the think close fed ahead of it: no draft.
                     if (d == call_begin_ && options_.think_close_on_call && parser.in_reasoning()) break;
@@ -1544,7 +1570,7 @@ void Engine::run(Job &job, Slot &sl) {
                         // Stage 2: Post-draft actual cost check via OnlineMtpLut (auto) or calibrated sigmoid (static)
                         float p_next = 0.5f;
                         if (is_auto_lut) {
-                            p_next = mtp_lut_.cond_prob(mtp_regime, step, lut_bin);
+                            p_next = active_lut.cond_prob(mtp_regime, step, lut_bin);
                         } else {
                             const float p_calib = 1.0f / (1.0f + std::exp(-(mtp_cfg.alpha * delta_logits + mtp_cfg.beta * (float)step + mtp_cfg.bias)));
                             p_next = std::clamp(p_calib, 0.01f, 0.995f);
@@ -1597,7 +1623,8 @@ void Engine::run(Job &job, Slot &sl) {
                     bool ended = false, cut = false;
                     for (; j < k; ++j) {
                         guard(ml, j);
-                        v = sampler.sample(ml, j);
+                        v = leviathan ? sampler.verify_leviathan(ml, j, ids[(size_t)j + 1], q_store[(size_t)j])
+                                      : sampler.sample(ml, j);
                         if (v != ids[(size_t)j + 1]) break;
                         ++res.mtp_accepted_tokens, ++res.completion_tokens;
                         if (so) so->feed(v);
@@ -1623,7 +1650,7 @@ void Engine::run(Job &job, Slot &sl) {
                     // Renewal-Reward EMA & OnlineMtpLut update after MTP verify round:
                     const int64_t acc = j;
                     if (is_auto_lut && lut_obs_n > 0) {
-                        mtp_lut_.update(mtp_regime, lut_obs, lut_obs_n, static_cast<int>(acc), ended || cut);
+                        active_lut.update(mtp_regime, lut_obs, lut_obs_n, static_cast<int>(acc), ended || cut);
                     }
                     const float decay = mtp_cfg.ema_decay;
                     const float round_T = get_verify_cost(k + 1, &mtp_cfg.hw_profile, true) + (float)k * draft_step_ms;
