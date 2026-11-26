@@ -1089,6 +1089,11 @@ Qwen4ExpSession::Qwen4ExpSession(const Qwen4ExpModel &model, int64_t capacity, i
         mtp_batch_picks_ = DeviceBuffer<kernels::MtpPick>((size_t)n_slots, "batched MTP picks");
         host_batch_picks_ = PinnedHostBuffer((size_t)n_slots * sizeof(kernels::MtpPick), "batched host MTP picks");
         host_batch_ids_ = PinnedHostBuffer((size_t)n_slots * sizeof(int32_t), "batched host MTP ids");
+        mtp_batch_cands_ =
+            DeviceBuffer<kernels::LogitCand>((size_t)n_slots * kernels::kLogitCands, "batched MTP candidates");
+        mtp_batch_cands_nan_ = DeviceBuffer<uint32_t>((size_t)n_slots, "batched MTP candidate NaN flags");
+        host_batch_cands_ = PinnedHostBuffer((size_t)n_slots * kernels::kLogitCands * sizeof(kernels::LogitCand),
+                                              "batched host MTP candidates");
     }
     // The other slots' states (each at the full capacity), each only while it leaves MemAvailable above the floor
     // (its cost measured on slot 0's, +10% for what varies): on this machine the GPU allocates from system RAM, and RAM
@@ -3729,9 +3734,9 @@ Qwen4ExpSession::MtpTop2 Qwen4ExpSession::forward_mtp_top2_seq(int seq, int32_t 
     return res[0];
 }
 
-std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) {
-    const char *fn = "Qwen4ExpSession::forward_mtp_top2_batch";
-    if (runs.empty()) return {};
+int64_t Qwen4ExpSession::mtp_batch_body(const std::vector<MtpDraftRun> &runs) {
+    const char *fn = "Qwen4ExpSession::mtp_batch_body";
+    if (runs.empty()) return 0;
     STRIX_CHECK(mtp_, fn, ": the session was made without MTP");
     STRIX_CHECK(!broken_, fn, ": an earlier session call failed midway; reset() the session first");
     const int64_t T = (int64_t)runs.size();
@@ -3940,23 +3945,27 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(co
     }
     kernels::linear_qw(u_.get(), head, logits_.get(), T, act, Act::F32, stream_);
 
-    // 12. Per-slot pick kernels and single host readback
-    const int64_t pick_vocab = target_rows;
+    return target_rows;
+}
+
+std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::mtp_batch_reduce(const std::vector<MtpDraftRun> &runs,
+                                                                         int64_t pick_vocab) {
+    const char *fn = "Qwen4ExpSession::mtp_batch_reduce";
+    const int64_t T = (int64_t)runs.size();
+    // Per-slot pick kernels and single host readback.
     for (size_t r = 0; r < (size_t)T; ++r) {
         const float *r_logits = logits_.get() + (size_t)r * (size_t)pick_vocab;
         auto *dev_pick = mtp_batch_picks_.get() + r;
         kernels::mtp_pick(r_logits, pick_vocab, runs[r].inv_T, router_err_.get(), expert_err_.get(), attn_err_.get(),
                           emb_err_.get(), dev_pick, stream_);
     }
-
     auto *host_picks = reinterpret_cast<kernels::MtpPick *>(host_batch_picks_.get());
     STRIX_HIP_CHECK(hipMemcpyAsync(host_picks, mtp_batch_picks_.get(),
                                    (size_t)T * sizeof(kernels::MtpPick),
                                    hipMemcpyDeviceToHost, stream_),
                     "reading batched MTP picks");
     STRIX_HIP_CHECK(hipStreamSynchronize(stream_), "syncing batched MTP draft");
-
-    // 13. Decode picks and return MtpTop2 results
+    // Decode picks and return MtpTop2 results.
     std::vector<MtpTop2> results((size_t)T);
     for (size_t r = 0; r < (size_t)T; ++r) {
         const kernels::MtpPick &p = host_picks[r];
@@ -3977,6 +3986,64 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(co
         results[r] = {final_best, p.best_v, p.second_v, p.nan != 0, p.p_top1};
     }
     return results;
+}
+
+std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) {
+    if (runs.empty()) return {};
+    const int64_t pick_vocab = mtp_batch_body(runs);
+    return mtp_batch_reduce(runs, pick_vocab);
+}
+
+// Leviathan's draft: the same batched head, but every row also gives back its top kernels::kLogitCands candidates
+// (logits_topk) so the host samples the draft from q instead of taking the argmax. best / p_top1 still come from
+// mtp_pick - the cost gate and the LUT bins are unchanged. The candidate copy rides the picks' sync.
+std::vector<Qwen4ExpSession::MtpCands> Qwen4ExpSession::forward_mtp_cands_batch(const std::vector<MtpDraftRun> &runs) {
+    const char *fn = "Qwen4ExpSession::forward_mtp_cands_batch";
+    if (runs.empty()) return {};
+    const int64_t pick_vocab = mtp_batch_body(runs);
+    const int64_t T = (int64_t)runs.size();
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        kernels::logits_topk(logits_.get() + (size_t)r * (size_t)pick_vocab, 1, pick_vocab, pick_vocab,
+                             mtp_batch_cands_.get() + (size_t)r * kernels::kLogitCands,
+                             mtp_batch_cands_nan_.get() + r, cand_ws_.get(), cand_ws_bytes_, stream_);
+    }
+    auto *host_cands = reinterpret_cast<kernels::LogitCand *>(host_batch_cands_.get());
+    STRIX_HIP_CHECK(hipMemcpyAsync(host_cands, mtp_batch_cands_.get(),
+                                   (size_t)T * kernels::kLogitCands * sizeof(kernels::LogitCand),
+                                   hipMemcpyDeviceToHost, stream_),
+                    "reading batched MTP candidates");
+    std::vector<MtpTop2> picks = mtp_batch_reduce(runs, pick_vocab);  // syncs the stream (the picks' copy)
+    std::vector<MtpCands> out((size_t)T);
+    const bool compact = !m_.compact_to_vocab().empty();
+    for (size_t r = 0; r < (size_t)T; ++r) {
+        const MtpTop2 &t = picks[r];
+        MtpCands &c = out[r];
+        c.best = t.best, c.best_v = t.best_v, c.second_v = t.second_v, c.nan = t.nan, c.p_top1 = t.p_top1;
+        STRIX_CHECK(!c.nan, fn, ": NaN in the MTP draft logits (seq ", runs[r].seq, ", step ", runs[r].step, ")");
+        for (int64_t i = 0; i < kernels::kLogitCands; ++i) {
+            const kernels::LogitCand &k = host_cands[(size_t)r * kernels::kLogitCands + (size_t)i];
+            int32_t id = k.id;
+            if (compact && id != INT32_MAX) {
+                STRIX_CHECK(id >= 0 && id < (int32_t)m_.compact_to_vocab().size(),
+                            fn, ": compact candidate ", id, " out of range [0, ", m_.compact_to_vocab().size(), ")");
+                id = m_.compact_to_vocab()[(size_t)id];
+            }
+            c.id[i] = id, c.v[i] = k.v;
+        }
+    }
+    return out;
+}
+
+Qwen4ExpSession::MtpCands Qwen4ExpSession::forward_mtp_cands(int32_t token_id, int64_t step, float inv_T) {
+    return forward_mtp_cands_seq(0, token_id, step, inv_T);
+}
+
+Qwen4ExpSession::MtpCands Qwen4ExpSession::forward_mtp_cands_seq(int seq, int32_t token_id, int64_t step,
+                                                                  float inv_T) {
+    std::vector<MtpDraftRun> runs = {{seq, token_id, step, inv_T}};
+    std::vector<MtpCands> res = forward_mtp_cands_batch(runs);
+    STRIX_CHECK(res.size() == 1, "forward_mtp_cands_seq: expected 1 result");
+    return res[0];
 }
 
 void Qwen4ExpSession::mtp_done(int seq, int64_t step) {

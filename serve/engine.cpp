@@ -1356,6 +1356,19 @@ void Engine::run(Job &job, Slot &sl) {
         const bool is_auto_lut = (mtp_cfg.lut_mode == Options::MtpLutMode::Auto);
         const int mtp_regime = OnlineMtpLut::regime_for_temp(req.sampling.temperature);
         const float mtp_inv_T = (req.sampling.temperature > 1e-6) ? static_cast<float>(1.0 / req.sampling.temperature) : 1.0f;
+        // Leviathan speculative sampling (Leviathan et al. 2023) at T > 0: the draft is sampled from the head's own
+        // truncated distribution q (at a cooler T_draft - on flat <think> forks an argmax draft the sampler would not
+        // pick is rejected ~60% of the time, a q-drawn one accepts at 1 - TVD(p, q)), and the verify accepts each
+        // draft with probability min(1, p/q), resampling from norm(max(0, p - q)) on a reject - exact to the
+        // request's sampler for any q (serve/sampler.hpp verify_leviathan). Greedy (T = 0) never enters it: the
+        // bit-identity path is untouched. Needs candidate rows (top_k 1..20) and a backend that returns them.
+        const bool leviathan = !is_greedy && cands && sl.be->supports_draft_cands() &&
+                               options_.mtp_speculative != Options::MtpSpec::Off;
+        // Draft temperature: cooler than the target (probe: Td/T = 0.70 best at T = 1.0, 0.85 at T = 0.6 - the
+        // monotone fit below; to be refined against the live OnlineMtpLut curve).
+        const double t_draft =
+            leviathan ? req.sampling.temperature * std::clamp(1.15 - 0.45 * req.sampling.temperature, 0.55, 1.0) : 0.0;
+        std::vector<Sampler::TruncDist> q_store((size_t)std::max<int64_t>(1, mtp_cfg.draft));
         for (;;) {
             if (sink.cancelled()) {
                 reason = "cancelled";
@@ -1519,7 +1532,18 @@ void Engine::run(Job &job, Slot &sl) {
                     }
 
                     const auto t_draft_start = std::chrono::steady_clock::now();
-                    const Top2 t = sl.be->forward_mtp_top2(ids.back(), step, mtp_inv_T);
+                    Top2 t;
+                    int32_t d;
+                    if (leviathan) {
+                        const LmBackend::MtpDraftCands c = sl.be->forward_mtp_cands(ids.back(), step, mtp_inv_T);
+                        t.best = c.best, t.best_v = c.best_v, t.second_v = c.second_v, t.nan = c.nan,
+                        t.p_top1 = c.p_top1;
+                        d = sampler.sample_draft_cands(c.v, c.id, LmBackend::MtpDraftCands::kCands, c.nan, t_draft,
+                                                        &q_store[(size_t)step]);
+                    } else {
+                        t = sl.be->forward_mtp_top2(ids.back(), step, mtp_inv_T);
+                        d = t.best;
+                    }
                     const auto t_draft_end = std::chrono::steady_clock::now();
                     const uint64_t ns_d = std::chrono::duration_cast<std::chrono::nanoseconds>(t_draft_end - t_draft_start).count();
                     g_hw_stats.draft_time_ns.fetch_add(ns_d, std::memory_order_relaxed);
@@ -1527,7 +1551,6 @@ void Engine::run(Job &job, Slot &sl) {
                     res.mtp_draft_ms += std::chrono::duration<double, std::milli>(t_draft_end - t_draft_start).count();
                     ++res.mtp_draft_calls;
                     STRIX_CHECK(!t.nan, "Engine: NaN in the MTP draft logits (step ", step, ")");
-                    const int32_t d = t.best;
                     if (d == im_end_ || d == eot_) break;
                     // A <tool_call> drafted inside the think block might need the think close fed ahead of it: no draft.
                     if (d == call_begin_ && options_.think_close_on_call && parser.in_reasoning()) break;
@@ -1597,7 +1620,8 @@ void Engine::run(Job &job, Slot &sl) {
                     bool ended = false, cut = false;
                     for (; j < k; ++j) {
                         guard(ml, j);
-                        v = sampler.sample(ml, j);
+                        v = leviathan ? sampler.verify_leviathan(ml, j, ids[(size_t)j + 1], q_store[(size_t)j])
+                                      : sampler.sample(ml, j);
                         if (v != ids[(size_t)j + 1]) break;
                         ++res.mtp_accepted_tokens, ++res.completion_tokens;
                         if (so) so->feed(v);

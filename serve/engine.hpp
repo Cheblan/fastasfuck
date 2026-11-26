@@ -242,6 +242,37 @@ public:
         }
         return out;
     }
+    // One draft step's top candidates (Leviathan speculative sampling): the head's top-kCands (id, raw logit) pairs
+    // - vocab-remapped, unmasked, unbiased - plus mtp_pick's reduction (best / margin / p_top1 at inv_T / NaN).
+    // p_top1 is at the request's temperature (the LUT's bins); the draft distribution q is built on the host at the
+    // draft temperature from these logits (serve/sampler.hpp sample_draft_cands).
+    struct MtpDraftCands {
+        static constexpr int64_t kCands = 20;  // kernels::kLogitCands (static_assert in the Qwen4Exp backend)
+        int32_t best = 0;
+        float best_v = 0, second_v = 0;
+        bool nan = false;
+        float p_top1 = 0.0f;
+        int32_t id[kCands];
+        float v[kCands];
+    };
+    virtual bool supports_draft_cands() const { return false; }
+    virtual MtpDraftCands forward_mtp_cands(int32_t token_id, int64_t step, float inv_T = 1.0f) {
+        (void)token_id, (void)step, (void)inv_T;
+        STRIX_CHECK(false, "LmBackend::forward_mtp_cands: this backend does not return draft candidate rows");
+        return {};
+    }
+    virtual MtpDraftCands forward_mtp_cands(int seq, int32_t token_id, int64_t step, float inv_T = 1.0f) {
+        check_seq(seq, "forward_mtp_cands");
+        return forward_mtp_cands(token_id, step, inv_T);
+    }
+    virtual std::vector<MtpDraftCands> forward_mtp_cands_batch(const std::vector<MtpDraftRun> &runs) {
+        std::vector<MtpDraftCands> out;
+        out.reserve(runs.size());
+        for (const auto &r : runs) {
+            out.push_back(forward_mtp_cands(r.seq, r.token_id, r.step, r.inv_T));
+        }
+        return out;
+    }
     virtual void prefetch_ple(int seq, const std::vector<int32_t> &ids, int64_t first) {
         check_seq(seq, "prefetch_ple");
         prefetch_ple(ids, first);
@@ -606,9 +637,15 @@ public:
             Auto,
             Static
         };
+        enum class MtpSpec {
+            Auto,  // Leviathan speculative sampling whenever it applies (T > 0, top_k 1..20, backend has cands)
+            On,    // same as auto (kept for A/B: off vs on)
+            Off    // argmax draft + exact-match verify (the pre-Leviathan path)
+        };
         MtpGateRule mtp_gate_rule = MtpGateRule::Margin;  // default for deterministic/greedy (T = 0)
         MtpGateRule sampled_gate = MtpGateRule::Cost;     // default for sampling (T > 0)
         MtpLutMode mtp_lut_mode = MtpLutMode::Auto;       // acceptance model: auto (online LUT) or static
+        MtpSpec mtp_speculative = MtpSpec::Auto;          // Leviathan speculative sampling at T > 0
         float mtp_lut_step_penalty = 0.015f;              // probability penalty deduction per draft step
         float mtp_ema_decay = 0.15f;                      // Renewal-Reward EMA smoothing factor
         std::string mtp_gate_rule_str() const {
@@ -620,6 +657,9 @@ public:
         std::string mtp_lut_mode_str() const {
             return mtp_lut_mode == MtpLutMode::Static ? "static" : "auto";
         }
+        std::string mtp_speculative_str() const {
+            return mtp_speculative == MtpSpec::Off ? "off" : (mtp_speculative == MtpSpec::On ? "on" : "auto");
+        }
         void set_mtp_gate_rule(const std::string &r) {
             mtp_gate_rule = (r == "cost") ? MtpGateRule::Cost : MtpGateRule::Margin;
         }
@@ -628,6 +668,9 @@ public:
         }
         void set_mtp_lut_mode(const std::string &r) {
             mtp_lut_mode = (r == "static") ? MtpLutMode::Static : MtpLutMode::Auto;
+        }
+        void set_mtp_speculative(const std::string &r) {
+            mtp_speculative = (r == "off") ? MtpSpec::Off : (r == "on") ? MtpSpec::On : MtpSpec::Auto;
         }
         PromptCache *cache = nullptr;
         float mtp_margin = 1.5f;  // logit margin (top1 - top2) required to draft MTP token

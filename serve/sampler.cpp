@@ -306,6 +306,114 @@ int32_t Sampler::draw_from_candidates(int64_t k) {
     return cand_[(size_t)(keep - 1)].second;
 }
 
+// A candidate row's top-k/top-p truncated distribution at `temp`: the same truncation draw_from_candidates applies,
+// returned instead of drawn from. Padding candidates (-inf, INT32_MAX - a masked row's tail) get probability 0 and
+// never enter the top-p prefix (the real candidates alone sum to 1).
+Sampler::TruncDist Sampler::trunc_dist_from_cands(const float *v, const int32_t *id, int64_t m, double temp) const {
+    STRIX_CHECK(temp > 0, "Sampler::trunc_dist_from_cands: temperature ", temp, ", expected > 0");
+    const int64_t n = n_valid_;
+    STRIX_CHECK(p_.top_k >= 1 && p_.top_k <= kCandidates, "Sampler::trunc_dist_from_cands: top_k ", p_.top_k,
+                " needs 1..", kCandidates);
+    const int64_t k = std::min<int64_t>(p_.top_k, n);
+    const int64_t keep_in = std::min<int64_t>(m, k);  // a masked row can hold fewer real candidates than k
+    STRIX_CHECK(keep_in >= 1, "Sampler::trunc_dist_from_cands: no candidates");
+    STRIX_CHECK(std::isfinite(v[0]), "Sampler::trunc_dist_from_cands: top logit is ", v[0]);
+    std::vector<double> prob((size_t)keep_in);
+    const double top = (double)v[0] / temp;
+    double sum = 0;
+    for (int64_t i = 0; i < keep_in; ++i) {
+        STRIX_CHECK(!std::isnan(v[i]), "Sampler::trunc_dist_from_cands: NaN logit for token ", id[i]);
+        prob[(size_t)i] = std::exp((double)v[i] / temp - top);  // -inf (padding) -> 0
+        sum += prob[(size_t)i];
+    }
+    STRIX_CHECK(sum > 0, "Sampler::trunc_dist_from_cands: every candidate underflowed at temperature ", temp);
+    int64_t keep = keep_in;
+    if (p_.top_p < 1) {
+        double acc = 0;
+        for (int64_t i = 0; i < keep_in; ++i) {
+            acc += prob[(size_t)i] / sum;
+            if (acc >= p_.top_p) {
+                keep = i + 1;
+                break;
+            }
+        }
+    }
+    double kept = 0;
+    for (int64_t i = 0; i < keep; ++i) kept += prob[(size_t)i];
+    TruncDist d;
+    d.id.assign(id, id + keep);
+    d.p.resize((size_t)keep);
+    for (int64_t i = 0; i < keep; ++i) d.p[(size_t)i] = prob[(size_t)i] / kept;
+    return d;
+}
+
+int32_t Sampler::sample_draft_cands(const float *v, const int32_t *id, int64_t m, bool nan, double temp,
+                                     TruncDist *q) {
+    STRIX_CHECK(v != nullptr && id != nullptr && q != nullptr, "Sampler::sample_draft_cands: null argument");
+    STRIX_CHECK(takes_candidates(), "Sampler::sample_draft_cands: temperature ", p_.temperature, ", top_k ", p_.top_k,
+                " need the whole row (candidates serve greedy or top_k 1..", kCandidates, ")");
+    const int64_t n = n_valid_;
+    STRIX_CHECK(m >= std::min<int64_t>(n, kCandidates), "Sampler::sample_draft_cands: ", m, " candidates, expected >= ",
+                std::min<int64_t>(n, kCandidates));
+    STRIX_CHECK(!nan, "Sampler::sample_draft_cands: NaN logit(s) in the row of ", n);
+    STRIX_CHECK(id[0] != INT32_MAX, "Sampler::sample_draft_cands: the row has no candidate at all (every id masked)");
+    TruncDist d = trunc_dist_from_cands(v, id, m, temp);
+    *q = std::move(d);
+    const double u = std::uniform_real_distribution<double>(0, 1)(rng_);
+    double acc = 0;
+    for (size_t i = 0; i < q->p.size(); ++i) {
+        acc += q->p[i];
+        if (u < acc) return q->id[i];
+    }
+    return q->id.back();
+}
+
+int32_t Sampler::verify_leviathan(const LogitRows &l, int64_t r, int32_t d, const TruncDist &q) {
+    STRIX_CHECK(p_.temperature > 0, "Sampler::verify_leviathan: temperature ", p_.temperature, ", expected > 0");
+    STRIX_CHECK(takes_candidates(), "Sampler::verify_leviathan: top_k ", p_.top_k, " needs 1..", kCandidates);
+    STRIX_CHECK(l.cands != 0, "Sampler::verify_leviathan: candidate rows only (the full row has no truncated p here)");
+    STRIX_CHECK(r >= 0 && r < l.rows, "Sampler::verify_leviathan: row ", r, " of ", l.rows);
+    STRIX_CHECK(l.cand_v.size() == (size_t)(l.rows * l.cands) && l.cand_id.size() == l.cand_v.size() &&
+                    l.nan.size() == (size_t)l.rows,
+                "Sampler::verify_leviathan: candidate arrays ", l.cand_v.size(), " / ", l.cand_id.size(), " / ",
+                l.nan.size(), " for ", l.rows, " rows of ", l.cands);
+    STRIX_CHECK(!l.nan[(size_t)r], "Sampler::verify_leviathan: NaN logit(s) in row ", r);
+    const TruncDist p =
+        trunc_dist_from_cands(l.cand_v.data() + r * l.cands, l.cand_id.data() + r * l.cands, l.cands, p_.temperature);
+    auto prob_of = [](const TruncDist &dist, int32_t tok) {
+        for (size_t i = 0; i < dist.id.size(); ++i)
+            if (dist.id[i] == tok) return dist.p[i];
+        return 0.0;
+    };
+    const double pd = prob_of(p, d), qd = prob_of(q, d);
+    STRIX_CHECK(qd > 0, "Sampler::verify_leviathan: draft token ", d, " has q = 0 (outside the proposal's support)");
+    if (pd >= qd || std::uniform_real_distribution<double>(0, 1)(rng_) < pd / qd) return d;
+    // Rejected: draw from norm(max(0, p - q)). q's ids outside p's support carry no residual mass (p = 0 there), so
+    // iterating p's support is exact. A zero residual (numerically) means p and q agreed to the last bit: draw p.
+    std::vector<double> res(p.id.size());
+    double sum = 0;
+    for (size_t i = 0; i < p.id.size(); ++i) {
+        res[i] = std::max(0.0, p.p[i] - prob_of(q, p.id[i]));
+        sum += res[i];
+    }
+    if (sum <= 1e-15) {
+        const double u = std::uniform_real_distribution<double>(0, 1)(rng_);
+        double acc = 0;
+        for (size_t i = 0; i < p.id.size(); ++i) {
+            acc += p.p[i];
+            if (u < acc) return p.id[i];
+        }
+        return p.id.back();
+    }
+    const double u = std::uniform_real_distribution<double>(0, sum)(rng_);
+    double acc = 0;
+    for (size_t i = 0; i < p.id.size(); ++i) {
+        acc += res[i];
+        if (u < acc) return p.id[i];
+    }
+    return p.id.back();
+}
+
 // A large top-k (above kSmallK, where the one-pass list's inserts would go quadratic): fill every candidate and
 // partial-sort the best k - the sampler's original way. The softmax / top-p / draw is the same tail as sample().
 int32_t Sampler::sample_large_k(const float *logits, int64_t k, float *out_margin) {
