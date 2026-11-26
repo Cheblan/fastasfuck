@@ -1,0 +1,264 @@
+#include "common/check.hpp"
+#include "serve/mtp_calib.hpp"
+#include "serve/seq_backend.hpp"
+
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <random>
+#include <thread>
+#include <vector>
+
+namespace {
+
+using strix::GpuArbiter;
+using strix::LogitMasks;
+using strix::LogitRows;
+using strix::MtpHardwareProfile;
+using strix::OnlineMtpLut;
+using strix::Top2;
+
+void test_censoring_and_stop_cut() {
+    OnlineMtpLut lut;
+    const OnlineMtpLut::DraftObs obs[4] = {
+        {0, 10},
+        {1, 11},
+        {2, 12},
+        {3, 13},
+    };
+
+    const auto pre2 = lut.cell(2, 2, 12);
+    const auto pre3 = lut.cell(2, 3, 13);
+
+    // 2 accepted, rejected at step 2 -> step 0,1 hit; step 2 miss; step 3 MUST NOT change.
+    lut.update(2, obs, 4, 2, false);
+    const auto c1 = lut.cell(2, 1, 11);
+    const auto c2 = lut.cell(2, 2, 12);
+    const auto c3 = lut.cell(2, 3, 13);
+
+    STRIX_CHECK(c1.trials > OnlineMtpLut::kPriorTrials, "step 1 trial incremented");
+    STRIX_CHECK(c2.trials > pre2.trials && c2.hits < pre2.hits, "step 2 miss lowered hits and raised trials");
+    STRIX_CHECK(std::abs(c3.hits - pre3.hits) < 1e-6f && std::abs(c3.trials - pre3.trials) < 1e-6f,
+                "censored step k=3 must remain untouched");
+
+    // Truncated by stop/length/budget cut after step 0 accepted -> step 1 MUST NOT be marked rejected!
+    const auto pre1 = lut.cell(2, 1, 11);
+    lut.update(2, obs, 4, 1, true);
+    const auto after1 = lut.cell(2, 1, 11);
+    STRIX_CHECK(std::abs(after1.hits - pre1.hits) < 1e-6f && std::abs(after1.trials - pre1.trials) < 1e-6f,
+                "ended_or_cut must not mark unverified step k=a as rejected");
+}
+
+void test_pava_monotonicity() {
+    OnlineMtpLut lut;
+    for (int i = 0; i < 60; ++i) {
+        const OnlineMtpLut::DraftObs low_hit[1] = {{0, 2}};
+        lut.update(2, low_hit, 1, 1, false);
+        const OnlineMtpLut::DraftObs high_miss[1] = {{0, 12}};
+        lut.update(2, high_miss, 1, 0, false);
+    }
+
+    for (int r = 0; r < OnlineMtpLut::kRegimes; ++r) {
+        for (int k = 0; k < OnlineMtpLut::kMaxK; ++k) {
+            float prev = 0.0f;
+            for (int b = 0; b < OnlineMtpLut::kBins; ++b) {
+                const float p = lut.cond_prob(r, k, b);
+                STRIX_CHECK(p >= OnlineMtpLut::kProbMin && p <= OnlineMtpLut::kProbMax, "prob out of bounds");
+                STRIX_CHECK(p + 1e-6f >= prev, "PAVA monotonicity violated at r=", r, " k=", k, " b=", b,
+                            ": ", p, " < ", prev);
+                prev = p;
+            }
+        }
+    }
+}
+
+void test_bernoulli_convergence() {
+    OnlineMtpLut lut;
+    std::mt19937 rng(42);
+    std::bernoulli_distribution bern(0.70);
+
+    for (int i = 0; i < 400; ++i) {
+        const OnlineMtpLut::DraftObs obs[1] = {{1, 8}};
+        const int acc = bern(rng) ? 1 : 0;
+        lut.update(2, obs, 1, acc, false);
+    }
+    const auto c = lut.cell(2, 1, 8);
+    const float empirical = c.hits / c.trials;
+    STRIX_CHECK(std::abs(empirical - 0.70f) < 0.05f, "Bernoulli p=0.70 converged poorly: ", empirical);
+    const float mono = lut.cond_prob(2, 1, 8);
+    STRIX_CHECK(mono >= OnlineMtpLut::kProbMin && mono <= OnlineMtpLut::kProbMax, "PAVA probability invalid");
+}
+
+void test_regimes_and_bins() {
+    STRIX_CHECK(OnlineMtpLut::regime_for_temp(0.0) == 0, "greedy regime");
+    STRIX_CHECK(OnlineMtpLut::regime_for_temp(0.3) == 1, "low temp regime");
+    STRIX_CHECK(OnlineMtpLut::regime_for_temp(0.6) == 2, "high temp regime");
+
+    int prev_bin = -1;
+    for (float d = 0.0f; d <= 10.0f; d += 0.5f) {
+        const int b = OnlineMtpLut::bin_for_delta_logits(d);
+        STRIX_CHECK(b >= 0 && b < OnlineMtpLut::kBins, "bin out of range");
+        STRIX_CHECK(b >= prev_bin, "bin mapping must be non-decreasing in delta_logits");
+        prev_bin = b;
+    }
+}
+
+class MockLmBackend final : public strix::LmBackend {
+public:
+    explicit MockLmBackend(int n) : n_(n) {}
+    int64_t capacity() const override { return 1024; }
+    int64_t max_chunk() const override { return 512; }
+    int64_t logits_row() const override { return 16; }
+    std::string describe() const override { return "mock"; }
+    int64_t pos() const override { return 0; }
+    void reset() override {}
+    bool has_mtp() const override { return true; }
+    int n_seqs() const override { return n_; }
+
+    std::vector<float> forward(const std::vector<int32_t> &ids, bool want_logits) override {
+        return forward(ids, static_cast<int64_t>(want_logits ? 1 : 0));
+    }
+    std::vector<float> forward(const std::vector<int32_t> &ids, int64_t n_logits) override {
+        (void)ids;
+        return std::vector<float>((size_t)n_logits * 16, 0.0f);
+    }
+    void save_snapshot(int slot) override { (void)slot; }
+    int64_t snapshot_pos(int slot) const override { (void)slot; return -1; }
+    bool can_restore_snapshot(int slot) const override { (void)slot; return false; }
+    void restore_snapshot(int slot) override { (void)slot; }
+    void export_snapshot(int slot, strix::HostBuffer &out, int64_t from) override { (void)slot, (void)out, (void)from; }
+    uint64_t snapshot_bytes(int slot, int64_t from) const override { (void)slot, (void)from; return 0; }
+    void import_state(const strix::HostBuffer &state, int64_t n, int64_t from) override {
+        (void)state, (void)n, (void)from;
+    }
+    std::string state_fingerprint() const override { return "mock"; }
+    Top2 forward_mtp_top2(int seq, int32_t token_id, int64_t step) override {
+        (void)seq, (void)token_id, (void)step;
+        return Top2{1, 5.0f, 1.0f, false};
+    }
+    std::vector<Top2> forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) override {
+        if (sleep_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+        return std::vector<Top2>(runs.size(), Top2{1, 5.0f, 1.0f, false});
+    }
+    std::vector<LogitRows> verify_batch(const std::vector<VerifyRun> &runs, bool cands, int64_t n_valid) override {
+        (void)cands, (void)n_valid;
+        if (verify_sleep_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(verify_sleep_ms));
+        std::vector<LogitRows> out;
+        out.reserve(runs.size());
+        for (const auto &r : runs) {
+            out.push_back(LogitRows::from_full(std::vector<float>(r.ids.size() * 16, 0.0f), 16));
+        }
+        return out;
+    }
+    void keep_verify(int seq, int64_t rows, int32_t carry) override {
+        (void)seq, (void)rows, (void)carry;
+    }
+    void drop_verify(int seq) override { (void)seq; }
+
+    int sleep_ms = 0;
+    int verify_sleep_ms = 0;
+
+private:
+    int n_ = 1;
+};
+
+void test_gpu_arbiter_zero_wait_and_buckets() {
+    // 1. Verify zero-wait in --slots 1 (n == 1)
+    {
+        MockLmBackend be(1);
+        MtpHardwareProfile prof;
+        GpuArbiter arb(be);
+        arb.set_hw_profile(&prof);
+        strix::SeqBackend sb(arb, 0);
+        arb.set_decoding(0, true);
+
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 20; ++i) {
+            (void)sb.forward_mtp_top2(1, 0);
+            (void)sb.forward_verify_rows({1, 2}, 2, false, 16);
+            sb.keep_verify();
+            arb.report_slot_acceptance(0, 2);
+        }
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        STRIX_CHECK(ms < 15.0, "solo n=1 must not hit arbiter coalesce timeout waits (took ", ms, " ms)");
+
+        // k == 0 single-row verify must update bucket 1 round_gpu_ms AND ema_slot_E = 1.0f
+        be.verify_sleep_ms = 20;
+        for (int i = 0; i < 30; ++i) {
+            (void)sb.forward_verify_rows({1}, 1, false, 16);
+            sb.keep_verify();
+            arb.report_slot_acceptance(0, 1);
+        }
+        const float tau1 = arb.bucket_tau(1);
+        STRIX_CHECK(tau1 > 12.0f && tau1 < 30.0f, "k==0 bucket 1 tau expected near 20 ms, got ", tau1);
+        arb.set_decoding(0, false);
+    }
+
+    // 2. Verify independent buckets on 4 <-> 1 concurrency switch + outlier clamp
+    {
+        MockLmBackend be(4);
+        MtpHardwareProfile prof;
+        GpuArbiter arb(be);
+        arb.set_hw_profile(&prof);
+
+        // Warm solo bucket (b = 1) at ~5ms verify, acceptance = 1 -> tau(1) ~ 5ms
+        arb.set_decoding(0, true);
+        be.verify_sleep_ms = 5;
+        for (int i = 0; i < 18; ++i) {
+            auto l = arb.verify(0, {0, {1, 2}, nullptr}, false, 16);
+            (void)l;
+            arb.run(0, GpuArbiter::Kind::Resolve, [&] { be.keep_verify(0, 2, -1); });
+            arb.report_slot_acceptance(0, 1);
+        }
+        const float warm_solo_tau = arb.cluster_tau();
+        STRIX_CHECK(warm_solo_tau >= 3.5f && warm_solo_tau <= 8.0f, "solo warm tau expected ~5, got ", warm_solo_tau);
+
+        // Outlier clamp test on solo bucket (rounds >= 16): inject 250ms stall, must clamp at 2x EMA
+        be.verify_sleep_ms = 250;
+        {
+            auto l = arb.verify(0, {0, {1, 2}, nullptr}, false, 16);
+            (void)l;
+            arb.run(0, GpuArbiter::Kind::Resolve, [&] { be.keep_verify(0, 2, -1); });
+            arb.report_slot_acceptance(0, 1);
+        }
+        const float after_spike = arb.ema_round_gpu_ms();
+        STRIX_CHECK(after_spike < 9.0f, "outlier clamp should cap 250ms spike before EMA, got ", after_spike);
+
+        // Switch up to 4 concurrent slots with heavier batch (~40ms, E=1) -> bucket 4 ~40ms, bucket 1 untouched!
+        for (int s = 1; s < 4; ++s) arb.set_decoding(s, true);
+        be.verify_sleep_ms = 40;
+        std::vector<std::thread> ths;
+        for (int s = 0; s < 4; ++s) {
+            ths.emplace_back([&, s] {
+                for (int r = 0; r < 4; ++r) {
+                    auto l = arb.verify(s, {s, {1, 2}, nullptr}, false, 16);
+                    (void)l;
+                    arb.run(s, GpuArbiter::Kind::Resolve, [&] { be.keep_verify(s, 2, -1); });
+                    arb.report_slot_acceptance(s, 1);
+                }
+            });
+        }
+        for (auto &t : ths) t.join();
+        const float batch_ema = arb.ema_round_gpu_ms();
+        STRIX_CHECK(batch_ema > 25.0f, "4-slot bucket should reflect ~40ms batch, got ", batch_ema);
+
+        // Drop back to 1 slot -> must IMMEDIATELY return warm solo bucket (~5ms), zero 4->1 drag!
+        for (int s = 1; s < 4; ++s) arb.set_decoding(s, false);
+        const float restored_solo_tau = arb.cluster_tau();
+        STRIX_CHECK(restored_solo_tau < 8.5f, "switching 4->1 must instantly restore bucket 1 tau, got ",
+                    restored_solo_tau);
+        arb.set_decoding(0, false);
+    }
+}
+
+}  // namespace
+
+int main() {
+    test_censoring_and_stop_cut();
+    test_pava_monotonicity();
+    test_bernoulli_convergence();
+    test_regimes_and_bins();
+    test_gpu_arbiter_zero_wait_and_buckets();
+    std::printf("PASS: test_online_mtp_lut\n");
+    return 0;
+}

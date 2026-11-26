@@ -1,10 +1,12 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
-#include <optional>
 #include "serve/json.hpp"
 
 namespace strix {
@@ -128,5 +130,50 @@ bool save_cached_profile(
     const std::string& cache_file,
     const MtpCalibratedProfile& profile
 );
+
+// Self-calibrating online empirical acceptance probability LUT for sampled-gate = cost.
+// Indexed by temperature regime, draft step k, and confidence bin; updated with EWMA + PAVA monotonicity
+// while strictly excluding censored steps (k > accepted, or unverified prefix cuts).
+class OnlineMtpLut {
+public:
+    static constexpr int kRegimes = 3;  // 0: greedy (T <= 1e-6), 1: low (0 < T <= 0.4), 2: high (T > 0.4)
+    static constexpr int kMaxK = 15;    // draft step positions 0..14 (matching --mtp-draft 1..15)
+    static constexpr int kBins = 16;    // confidence bins
+    static constexpr float kPriorTrials = 8.0f;
+    static constexpr float kGamma = 0.995f;
+    static constexpr float kProbMin = 0.01f;
+    static constexpr float kProbMax = 0.995f;
+
+    struct Cell {
+        float hits = 0.0f;
+        float trials = 0.0f;
+    };
+
+    struct DraftObs {
+        int step = 0;
+        int bin = 0;
+    };
+
+    OnlineMtpLut();
+
+    void reset();
+
+    static int regime_for_temp(double temp);
+    static int bin_for_delta_logits(float delta_logits);
+
+    float cond_prob(int regime, int64_t step, int bin) const;
+    void update(int regime, const DraftObs* obs, size_t count, int accepted, bool ended_or_cut);
+
+    uint64_t updates_total() const;
+    Cell cell(int regime, int step, int bin) const;
+
+private:
+    void recompute_pava_locked(int regime, int step);
+
+    mutable std::mutex mu_;
+    std::array<std::array<std::array<Cell, kBins>, kMaxK>, kRegimes> cells_{};
+    std::array<std::array<std::array<float, kBins>, kMaxK>, kRegimes> prob_mono_{};
+    uint64_t updates_total_ = 0;
+};
 
 } // namespace strix

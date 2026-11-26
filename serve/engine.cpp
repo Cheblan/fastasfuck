@@ -122,10 +122,8 @@ Engine::Engine(LmBackend &backend, const Tokenizer &tok, const Options &options)
     idle_since_ = now_s();
     const int n = be_.n_seqs();
     STRIX_CHECK(n >= 1 && n <= 8, "Engine: the backend holds ", n, " conversations, expected 1..8");
-    if (n > 1) {
-        arbiter_ = std::make_unique<GpuArbiter>(be_);
-        arbiter_->set_hw_profile(&options_.mtp_hw_profile);
-    }
+    arbiter_ = std::make_unique<GpuArbiter>(be_);
+    arbiter_->set_hw_profile(&options_.mtp_hw_profile);
     be_.set_on_slot_evicted([this](int k) {
         std::lock_guard<std::mutex> lock(mu_);
         if (k >= 0 && (size_t)k < slots_.size()) {
@@ -139,8 +137,7 @@ Engine::Engine(LmBackend &backend, const Tokenizer &tok, const Options &options)
     for (int k = 0; k < n; ++k) {
         auto sl = std::make_unique<Slot>();
         sl->index = k;
-        if (n > 1) sl->proxy = std::make_unique<SeqBackend>(*arbiter_, k), sl->be = sl->proxy.get();
-        else sl->be = &be_;  // one slot: the backend itself, exactly as before
+        sl->proxy = std::make_unique<SeqBackend>(*arbiter_, k), sl->be = sl->proxy.get();
         slots_.push_back(std::move(sl));
     }
     stats_.slots = n, stats_.slot_request.assign((size_t)n, 0), stats_.slot_live_tokens.assign((size_t)n, 0);
@@ -360,18 +357,26 @@ void Engine::reset_hw_latency_stats() {
 }
 
 EngineStats Engine::stats() const {
-    std::lock_guard<std::mutex> lock(mu_);
-    EngineStats s = stats_;
-    s.idle_seconds = s.busy || s.queued ? 0.0 : std::max(0.0, now_s() - idle_since_);
-    if (arbiter_) {
-        const GpuArbiter::Stats a = arbiter_->stats();
-        s.verify_batches = a.verify_batches, s.verify_batch_runs = a.verify_runs, s.verify_alone = a.verify_alone;
-        s.draft_batches = a.draft_batches, s.draft_batch_runs = a.draft_runs;
-        s.decoding_slots = arbiter_->decoding_count();
-        s.cluster_tau = (double)arbiter_->cluster_tau();
-        s.scale_verify = (double)arbiter_->scale_verify();
-        s.scale_draft = (double)arbiter_->scale_draft();
+    EngineStats s;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        s = stats_;
+        s.idle_seconds = s.busy || s.queued ? 0.0 : std::max(0.0, now_s() - idle_since_);
+        if (arbiter_) {
+            const GpuArbiter::Stats a = arbiter_->stats();
+            s.verify_batches = a.verify_batches, s.verify_batch_runs = a.verify_runs, s.verify_alone = a.verify_alone;
+            s.draft_batches = a.draft_batches, s.draft_batch_runs = a.draft_runs;
+            s.decoding_slots = arbiter_->decoding_count();
+            s.cluster_tau = (double)arbiter_->cluster_tau();
+            s.scale_verify = (double)arbiter_->scale_verify();
+            s.scale_draft = (double)arbiter_->scale_draft();
+            s.mtp_ema_round_ms = (double)arbiter_->ema_round_gpu_ms();
+            s.mtp_ema_draft_step_ms = (double)arbiter_->ema_draft_step_ms();
+            s.mtp_tau_global_ms = s.cluster_tau;
+            s.mtp_solo_verify_scale = (double)arbiter_->bucket_scale_verify(1);
+        }
     }
+    s.mtp_lut_updates_total = mtp_lut_.updates_total();
     return s;
 }
 
@@ -1348,6 +1353,8 @@ void Engine::run(Job &job, Slot &sl) {
         int32_t carry = -1;
         float ema_T = 48.0f;
         float ema_E = 3.2f;
+        const bool is_auto_lut = (mtp_cfg.lut_mode == Options::MtpLutMode::Auto);
+        const int mtp_regime = OnlineMtpLut::regime_for_temp(req.sampling.temperature);
         for (;;) {
             if (sink.cancelled()) {
                 reason = "cancelled";
@@ -1475,17 +1482,20 @@ void Engine::run(Job &job, Slot &sl) {
                 StructuredOutput::Cursor draft_at = so ? so->cursor() : StructuredOutput::Cursor{};
 
                 // Under Renewal-Reward theory, each slot evaluates its marginal throughput trade-off:
-                // For solo mode (n_dec <= 1): tau_global = ema_T / ema_E
-                // For multi-slot mode (n_dec > 1): tau_global is cluster-wide from GpuArbiter
+                // Auto mode unifies solo & multi-slot via GpuArbiter bucketed by active n_dec;
+                // Static mode keeps legacy solo static EMA for clean A/B comparison.
                 const int n_dec = arbiter_ ? arbiter_->decoding_count() : 1;
-                const float tau_global = (n_dec > 1 && arbiter_) ? arbiter_->cluster_tau()
-                                                                 : (ema_T / std::max(1.0f, ema_E));
                 const bool is_solo = (n_dec <= 1);
-                const float sv = (n_dec > 1 && arbiter_) ? arbiter_->scale_verify() : 1.0f;
-                const float sd = (n_dec > 1 && arbiter_) ? arbiter_->scale_draft() : 1.0f;
+                const bool use_arbiter_timing = arbiter_ && (is_auto_lut || n_dec > 1);
+                const float tau_global = use_arbiter_timing ? arbiter_->cluster_tau()
+                                                            : (ema_T / std::max(1.0f, ema_E));
+                const float sv = use_arbiter_timing ? arbiter_->scale_verify() : 1.0f;
+                const float sd = use_arbiter_timing ? arbiter_->scale_draft() : 1.0f;
                 const float draft_step_ms = (mtp_cfg.hw_profile.draft_step_ms > 0.0f) ? mtp_cfg.hw_profile.draft_step_ms : (sl.be ? sl.be->mtp_draft_step_ms() : kDefaultMtpDraftStepMs);
 
                 float P_cum = 1.0f;
+                OnlineMtpLut::DraftObs lut_obs[kMtpMaxDraft]{};
+                size_t lut_obs_n = 0;
 
                 for (int64_t step = 0; step < steps; ++step) {
                     const int64_t k_curr = step;
@@ -1526,11 +1536,17 @@ void Engine::run(Job &job, Slot &sl) {
                         draft_at = so->after(draft_at, d);
                     }
 
+                    const float delta_logits = t.best_v - t.second_v;
                     if (active_gate == Options::MtpGateRule::Cost) {
-                        // Stage 2: Post-draft actual cost check via calibrated sigmoid model
-                        const float delta_logits = t.best_v - t.second_v;
-                        const float p_calib = 1.0f / (1.0f + std::exp(-(mtp_cfg.alpha * delta_logits + mtp_cfg.beta * (float)step + mtp_cfg.bias)));
-                        const float p_next = std::clamp(p_calib, 0.01f, 0.995f);
+                        // Stage 2: Post-draft actual cost check via OnlineMtpLut (auto) or calibrated sigmoid (static)
+                        const int bin = OnlineMtpLut::bin_for_delta_logits(delta_logits);
+                        float p_next = 0.5f;
+                        if (is_auto_lut) {
+                            p_next = mtp_lut_.cond_prob(mtp_regime, step, bin);
+                        } else {
+                            const float p_calib = 1.0f / (1.0f + std::exp(-(mtp_cfg.alpha * delta_logits + mtp_cfg.beta * (float)step + mtp_cfg.bias)));
+                            p_next = std::clamp(p_calib, 0.01f, 0.995f);
+                        }
                         const float P_cum_next = P_cum * p_next;
 
                         if (P_cum_next * tau_global <= delta_T) {
@@ -1539,6 +1555,9 @@ void Engine::run(Job &job, Slot &sl) {
                         }
 
                         ids.push_back(d);
+                        if (lut_obs_n < (size_t)kMtpMaxDraft) {
+                            lut_obs[lut_obs_n++] = {static_cast<int>(step), bin};
+                        }
                         P_cum = P_cum_next;
                     } else {
                         // Margin mode
@@ -1546,8 +1565,11 @@ void Engine::run(Job &job, Slot &sl) {
                         if (mtp_cfg.escalating_margin) {
                             required_margin += (float)step * mtp_cfg.margin_slope;
                         }
-                        if (t.best_v - t.second_v < required_margin) break;
+                        if (delta_logits < required_margin) break;
                         ids.push_back(d);
+                        if (is_auto_lut && lut_obs_n < (size_t)kMtpMaxDraft) {
+                            lut_obs[lut_obs_n++] = {static_cast<int>(step), OnlineMtpLut::bin_for_delta_logits(delta_logits)};
+                        }
                     }
 
                     if (step + 1 < steps) sl.be->prefetch_ple(ids, (int64_t)ids.size() - 1);  // the last: nothing to hide behind
@@ -1596,15 +1618,18 @@ void Engine::run(Job &job, Slot &sl) {
                         }
                     }
 
-                    // Renewal-Reward EMA update after MTP verify round:
+                    // Renewal-Reward EMA & OnlineMtpLut update after MTP verify round:
                     const int64_t acc = j;
+                    if (is_auto_lut && lut_obs_n > 0) {
+                        mtp_lut_.update(mtp_regime, lut_obs, lut_obs_n, static_cast<int>(acc), ended || cut);
+                    }
+                    const float decay = mtp_cfg.ema_decay;
                     const float round_T = get_verify_cost(k + 1, &mtp_cfg.hw_profile, true) + (float)k * draft_step_ms;
                     const float round_E = 1.0f + (float)acc;
-                    const float decay = mtp_cfg.ema_decay;
                     ema_T = (1.0f - decay) * ema_T + decay * round_T;
                     ema_E = (1.0f - decay) * ema_E + decay * round_E;
                     if (arbiter_) {
-                        arbiter_->report_slot_acceptance(1 + (int)acc);
+                        arbiter_->report_slot_acceptance(sl.index, 1 + (int)acc);
                     }
 
                     if (cut) {  // at the budget's stop (above): id and j accepted drafts kept
@@ -1668,8 +1693,8 @@ void Engine::run(Job &job, Slot &sl) {
             }
             ++res.decode_forwards;
             if (arbiter_ && sl.be->has_mtp()) {
-                // Several slots: a step with no draft is a verify of id alone, so it joins the other slots' batch. As a
-                // plain forward it ran alone on the GPU and held their batch until it finished.
+                // Step with no draft is a 1-token verify: joins batched verify across active slots and updates
+                // GpuArbiter bucket timing + 1-token acceptance cleanly for k == 0 as well.
                 const auto t_v0 = std::chrono::steady_clock::now();
                 LogitRows ml = sl.be->forward_verify_rows({id}, 1, cands, n_valid, masks_for({}));
                 const auto t_v1 = std::chrono::steady_clock::now();
@@ -1688,7 +1713,7 @@ void Engine::run(Job &job, Slot &sl) {
             ema_T = (1.0f - decay) * ema_T + decay * get_verify_cost(1, &mtp_cfg.hw_profile, true);
             ema_E = (1.0f - decay) * ema_E + decay * 1.0f;
             if (arbiter_) {
-                arbiter_->report_slot_acceptance(1);
+                arbiter_->report_slot_acceptance(sl.index, 1);
             }
         }
         decoding.end();

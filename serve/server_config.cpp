@@ -335,6 +335,7 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
         {"mtp-margin", K::Number, 0, 100, "1.5", "MTP: draft only while the top-1 logit margin is at least this"},
         {"mtp-gate-rule", K::Text, 0, 0, "margin", "MTP gate rule for deterministic/greedy (T = 0): margin or cost"},
         {"sampled-gate", K::Text, 0, 0, "cost", "MTP gate rule for sampling (T > 0): cost or margin"},
+        {"mtp-lut-mode", K::Text, 0, 0, "auto", "MTP cost-gating acceptance model: auto (online LUT) or static (alpha/beta/bias)"},
         {"mtp-calib", K::OnOff, 0, 0, "on", "MTP auto-calibration at server startup"},
         {"mtp-calib-draft-samples", K::Int, 10, 5000, "300", "number of timing samples for draft head latency"},
         {"mtp-calib-verify-samples", K::Int, 10, 500, "50", "number of timing samples for verify pass latency"},

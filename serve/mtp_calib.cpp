@@ -346,4 +346,130 @@ bool save_cached_profile(
     return true;
 }
 
+OnlineMtpLut::OnlineMtpLut() {
+    reset();
+}
+
+void OnlineMtpLut::reset() {
+    std::lock_guard<std::mutex> lock(mu_);
+    static constexpr float kRegimeScale[kRegimes] = {1.0f, 0.92f, 0.85f};
+    for (int r = 0; r < kRegimes; ++r) {
+        for (int k = 0; k < kMaxK; ++k) {
+            const float step_decay = std::pow(0.95f, static_cast<float>(k));
+            for (int b = 0; b < kBins; ++b) {
+                const float u_mid = (static_cast<float>(b) + 0.5f) / static_cast<float>(kBins);
+                const float bin_mid = 0.5f + 0.5f * u_mid;
+                const float p0 = std::clamp(bin_mid * step_decay * kRegimeScale[r], 0.05f, 0.98f);
+                cells_[r][k][b].hits = kPriorTrials * p0;
+                cells_[r][k][b].trials = kPriorTrials;
+            }
+            recompute_pava_locked(r, k);
+        }
+    }
+    updates_total_ = 0;
+}
+
+int OnlineMtpLut::regime_for_temp(double temp) {
+    if (temp <= 1e-6) return 0;
+    if (temp <= 0.4) return 1;
+    return 2;
+}
+
+int OnlineMtpLut::bin_for_delta_logits(float delta_logits) {
+    const float clamped = std::clamp(delta_logits, 0.0f, 20.0f);
+    const float sig = 1.0f / (1.0f + std::exp(-clamped));
+    const float u = std::clamp((sig - 0.5f) * 2.0f, 0.0f, 0.999999f);
+    return std::clamp(static_cast<int>(u * static_cast<float>(kBins)), 0, kBins - 1);
+}
+
+void OnlineMtpLut::recompute_pava_locked(int regime, int step) {
+    float blk_hits[kBins];
+    float blk_trials[kBins];
+    int blk_len[kBins];
+    int n_blk = 0;
+
+    for (int b = 0; b < kBins; ++b) {
+        blk_hits[n_blk] = cells_[regime][step][b].hits;
+        blk_trials[n_blk] = std::max(1e-6f, cells_[regime][step][b].trials);
+        blk_len[n_blk] = 1;
+        ++n_blk;
+
+        while (n_blk >= 2) {
+            const float prev_h = blk_hits[n_blk - 2];
+            const float prev_t = blk_trials[n_blk - 2];
+            const float curr_h = blk_hits[n_blk - 1];
+            const float curr_t = blk_trials[n_blk - 1];
+            if (prev_h * curr_t <= curr_h * prev_t) break;
+            blk_hits[n_blk - 2] += curr_h;
+            blk_trials[n_blk - 2] += curr_t;
+            blk_len[n_blk - 2] += blk_len[n_blk - 1];
+            --n_blk;
+        }
+    }
+
+    int idx = 0;
+    for (int i = 0; i < n_blk; ++i) {
+        const float p = std::clamp(blk_hits[i] / blk_trials[i], kProbMin, kProbMax);
+        for (int j = 0; j < blk_len[i]; ++j) {
+            prob_mono_[regime][step][idx++] = p;
+        }
+    }
+}
+
+float OnlineMtpLut::cond_prob(int regime, int64_t step, int bin) const {
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int k = static_cast<int>(std::clamp<int64_t>(step, 0, kMaxK - 1));
+    const int b = std::clamp(bin, 0, kBins - 1);
+    std::lock_guard<std::mutex> lock(mu_);
+    return prob_mono_[r][k][b];
+}
+
+void OnlineMtpLut::update(int regime, const DraftObs* obs, size_t count, int accepted, bool ended_or_cut) {
+    if (!obs || count == 0) return;
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int n = static_cast<int>(count);
+    const int a = std::clamp(accepted, 0, n);
+
+    bool dirty[kMaxK]{};
+    std::lock_guard<std::mutex> lock(mu_);
+
+    for (int i = 0; i < a; ++i) {
+        const int k = std::clamp(obs[i].step, 0, kMaxK - 1);
+        const int b = std::clamp(obs[i].bin, 0, kBins - 1);
+        Cell &c = cells_[r][k][b];
+        c.hits = kGamma * c.hits + 1.0f;
+        c.trials = kGamma * c.trials + 1.0f;
+        dirty[k] = true;
+    }
+
+    // Only mark step `a` rejected when verification actually tested and rejected it (not stop/length/budget cut).
+    // Strictly skip censored steps k > a.
+    if (!ended_or_cut && a < n) {
+        const int k = std::clamp(obs[a].step, 0, kMaxK - 1);
+        const int b = std::clamp(obs[a].bin, 0, kBins - 1);
+        Cell &c = cells_[r][k][b];
+        c.hits = kGamma * c.hits;
+        c.trials = kGamma * c.trials + 1.0f;
+        dirty[k] = true;
+    }
+
+    for (int k = 0; k < kMaxK; ++k) {
+        if (dirty[k]) recompute_pava_locked(r, k);
+    }
+    ++updates_total_;
+}
+
+uint64_t OnlineMtpLut::updates_total() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return updates_total_;
+}
+
+OnlineMtpLut::Cell OnlineMtpLut::cell(int regime, int step, int bin) const {
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int k = std::clamp(step, 0, kMaxK - 1);
+    const int b = std::clamp(bin, 0, kBins - 1);
+    std::lock_guard<std::mutex> lock(mu_);
+    return cells_[r][k][b];
+}
+
 } // namespace strix

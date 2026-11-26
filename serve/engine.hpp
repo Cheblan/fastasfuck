@@ -561,6 +561,11 @@ struct EngineStats {
     double cluster_tau = 0;
     double scale_verify = 1.0;
     double scale_draft = 1.0;
+    double mtp_ema_round_ms = 0;
+    double mtp_ema_draft_step_ms = 0;
+    double mtp_tau_global_ms = 0;
+    double mtp_solo_verify_scale = 1.0;
+    uint64_t mtp_lut_updates_total = 0;
     // Seconds since the last request finished (or the engine started); 0 while one runs or waits. `busy` alone reads
     // 1 through a steady agent session, so a batch client sampling it saw a "stuck" flag; this lets it
     // wait for a real gap (e.g. idle_seconds >= 2).
@@ -585,8 +590,13 @@ public:
             Margin,
             Cost
         };
+        enum class MtpLutMode {
+            Auto,
+            Static
+        };
         MtpGateRule mtp_gate_rule = MtpGateRule::Margin;  // default for deterministic/greedy (T = 0)
         MtpGateRule sampled_gate = MtpGateRule::Cost;     // default for sampling (T > 0)
+        MtpLutMode mtp_lut_mode = MtpLutMode::Auto;       // acceptance model: auto (online LUT) or static
         float mtp_lut_step_penalty = 0.015f;              // probability penalty deduction per draft step
         float mtp_ema_decay = 0.15f;                      // Renewal-Reward EMA smoothing factor
         std::string mtp_gate_rule_str() const {
@@ -595,11 +605,17 @@ public:
         std::string sampled_gate_str() const {
             return sampled_gate == MtpGateRule::Cost ? "cost" : "margin";
         }
+        std::string mtp_lut_mode_str() const {
+            return mtp_lut_mode == MtpLutMode::Static ? "static" : "auto";
+        }
         void set_mtp_gate_rule(const std::string &r) {
             mtp_gate_rule = (r == "cost") ? MtpGateRule::Cost : MtpGateRule::Margin;
         }
         void set_sampled_gate(const std::string &r) {
             sampled_gate = (r == "margin") ? MtpGateRule::Margin : MtpGateRule::Cost;
+        }
+        void set_mtp_lut_mode(const std::string &r) {
+            mtp_lut_mode = (r == "static") ? MtpLutMode::Static : MtpLutMode::Auto;
         }
         PromptCache *cache = nullptr;
         float mtp_margin = 1.5f;  // logit margin (top1 - top2) required to draft MTP token
@@ -669,6 +685,7 @@ public:
     const PromptCache *prompt_cache() const { return cache_; }
     struct MtpRuntimeConfig {
         Options::MtpGateRule gate_rule = Options::MtpGateRule::Cost;
+        Options::MtpLutMode lut_mode = Options::MtpLutMode::Auto;
         int64_t draft = 3;
         float margin = 2.5f;
         bool escalating_margin = false;
@@ -684,6 +701,7 @@ public:
         std::lock_guard<std::mutex> lk(mtp_mu_);
         MtpRuntimeConfig cfg;
         cfg.gate_rule = is_greedy ? options_.mtp_gate_rule : options_.sampled_gate;
+        cfg.lut_mode = options_.mtp_lut_mode;
         cfg.draft = options_.mtp_draft;
         cfg.margin = options_.mtp_margin;
         cfg.escalating_margin = options_.mtp_escalating_margin;
@@ -705,6 +723,8 @@ public:
     std::string mtp_gate_rule_str() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_gate_rule_str(); }
     Options::MtpGateRule sampled_gate() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.sampled_gate; }
     std::string sampled_gate_str() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.sampled_gate_str(); }
+    Options::MtpLutMode mtp_lut_mode() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_lut_mode; }
+    std::string mtp_lut_mode_str() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_lut_mode_str(); }
     float mtp_lut_step_penalty() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_lut_step_penalty; }
     float mtp_ema_decay() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_ema_decay; }
     void set_mtp_margin(float m) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_margin = m; }
@@ -713,6 +733,7 @@ public:
     void set_mtp_margin_slope(float s) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_margin_slope = s; }
     void set_mtp_gate_rule(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_mtp_gate_rule(r); }
     void set_sampled_gate(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_sampled_gate(r); }
+    void set_mtp_lut_mode(const std::string &r) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.set_mtp_lut_mode(r); }
     void set_mtp_lut_step_penalty(float p) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_lut_step_penalty = p; }
     void set_mtp_ema_decay(float d) { std::lock_guard<std::mutex> lk(mtp_mu_); options_.mtp_ema_decay = d; }
     float mtp_alpha() const { std::lock_guard<std::mutex> lk(mtp_mu_); return options_.mtp_alpha; }
@@ -826,6 +847,7 @@ private:
     std::vector<std::unique_ptr<Slot>> slots_;
     mutable std::mutex mu_;
     mutable std::mutex mtp_mu_;
+    OnlineMtpLut mtp_lut_;
     std::condition_variable cv_;
     std::deque<Job> queue_;
     bool stop_ = false;

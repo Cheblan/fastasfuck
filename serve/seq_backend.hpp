@@ -13,12 +13,13 @@
 //   - after a batched verify only its resolutions (keep / drop) and hints run until every member resolved;
 //   - a call that fails midway leaves every seq's state suspect (LmBackend::failed): every seq's next call refuses
 //     until it reset()s, and the first reset after the failure resets the whole backend.
-// One slot (n_seqs() == 1): the engine uses the backend directly, no arbiter - single-conversation serving is
-// unchanged.
+// Every configuration (1..8 slots) routes through GpuArbiter and SeqBackend so solo and multi-slot share
+// the exact same scheduling and bucketed Renewal-Reward EMA path.
 
 #include "serve/engine.hpp"
 #include "serve/mtp_calib.hpp"
 
+#include <array>
 #include <condition_variable>
 #include <exception>
 #include <functional>
@@ -69,15 +70,19 @@ public:
     // How many seqs are running a request's decode (the engine sizes its draft chains so their verifies fit one batch).
     int decoding_count() const;
 
-    // Multi-slot cluster metrics and hardware scaling
+    // Cluster / solo-unified MTP metrics and hardware scaling (bucketed by active concurrency n_dec)
     int pending_verifies_count() const;
     int64_t pending_verify_rows() const;
     int active_drafting_count() const;
     float cluster_tau() const;
     float scale_verify() const;
     float scale_draft() const;
-    void report_slot_acceptance(int accepted);
-    void set_hw_profile(const MtpHardwareProfile *prof) { hw_prof_ = prof; }
+    float ema_round_gpu_ms() const;
+    float ema_draft_step_ms() const;
+    float bucket_scale_verify(int bucket) const;
+    float bucket_tau(int bucket) const;
+    void report_slot_acceptance(int seq, int accepted);
+    void set_hw_profile(const MtpHardwareProfile *prof);
 
     // How long a waiting verify holds its batch for a decoding seq that hasn't sent its own yet,
     // within [kBatchWaitMinSeconds, kBatchWaitMaxSeconds].
@@ -148,14 +153,28 @@ private:
     std::vector<int> concurrent_;           // per-seq active run_concurrent calls (awaited by reset)
     int concurrent_total_ = 0;              // total active across all seqs (awaited by whole reset)
 
+    static constexpr int kMaxBuckets = 8;
+    struct MtpBucket {
+        float ema_round_gpu_ms = 45.0f;
+        float ema_slot_E = 2.0f;
+        float ema_draft_step_ms = 1.64f;
+        float s_verify = 1.0f;
+        float s_draft = 1.0f;
+        uint64_t verify_rounds = 0;
+        uint64_t draft_rounds = 0;
+        uint64_t accept_rounds = 0;
+        uint32_t verify_outliers = 0;
+        uint32_t draft_outliers = 0;
+    };
+    const MtpBucket &read_bucket_locked(int requested_b, int &eff_b) const;
+
     const MtpHardwareProfile *hw_prof_ = nullptr;
-    double draft_ms_accum_ = 0.0;
-    float s_verify_ = 1.0f;
-    float s_draft_ = 1.0f;
-    float ema_round_gpu_ms_ = 45.0f;
-    float ema_batch_runs_ = 3.5f;
-    float ema_slot_E_ = 2.0f;
+    std::vector<double> slot_draft_ms_;
+    std::vector<int> last_verify_bucket_;
+    std::array<MtpBucket, kMaxBuckets + 1> buckets_{};
+    int last_active_bucket_ = 1;
     static constexpr float kEmaDecay = 0.05f;
+    static constexpr uint64_t kOutlierWarmupRounds = 16;
 };
 
 // One slot's view of the shared backend: LmBackend's single-conversation calls, mapped to seq's.
