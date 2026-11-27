@@ -191,7 +191,7 @@ int run(int argc, char **argv) {
     const KvFormat kv_format = parse_kv_format(settings.text("kv-cache"));  // an unknown value fails startup
     const bool use_mtp = settings.on("mtp");
     const bool draft_head_q4 = settings.on("draft-head-q4");
-    const int64_t mtp_draft = settings.integer("mtp-draft"), mtp_vocab = settings.integer("mtp-vocab");
+    const int64_t mtp_draft = settings.integer("mtp-draft");
     const float mtp_margin = (float)settings.number("mtp-margin");
     const std::string mtp_gate_rule = settings.text("mtp-gate-rule");
     const std::string sampled_gate = settings.text("sampled-gate");
@@ -224,14 +224,10 @@ int run(int argc, char **argv) {
     const Tokenizer tok(tokenizer);
     slog(LogLevel::Info, "startup: tokenizer %s (%d tokens)", tokenizer.c_str(), tok.size());
 
-    // Early validation: check MTP vocabulary filter and prerequisites before loading weights (~50 s)
-    const std::string vocab_filter_spec = settings.text("mtp-vocab-filter");
-    const uint32_t filter_mask = vocab_filter::parse_filter(vocab_filter_spec);
-    const bool is_filtered = !vocab_filter::is_all(filter_mask);
-    if (is_filtered) {
-        STRIX_CHECK(mtp_vocab == 0, "fastasfuck_server: --mtp-vocab-filter cannot be combined with nonzero --mtp-vocab (got ",
-                    mtp_vocab, "); use --mtp-vocab 0 with filtering");
-    }
+    // Early validation: check MTP vocabulary filter before loading weights (~50 s)
+    const std::string vocab_filter_spec_raw = settings.text("mtp-vocab-filter");
+    const vocab_filter::FilterSpec filter_spec = vocab_filter::parse_filter(vocab_filter_spec_raw);
+    const bool is_filtered = !vocab_filter::is_all(filter_spec);
 
     const WeightPlacement placement = parse_weight_placement(settings.text("placement"), "placement");
     // Vision: the tower file is a sibling of the served weights; the preprocessor values come
@@ -269,29 +265,45 @@ int run(int argc, char **argv) {
                  (double)model.weights().data_bytes() / (1ull << 30), model.weights().load_seconds());
     // MTP drafts score a compact / Q4 copy of the draft vocabulary's LM head rows (Qwen4ExpModel::make_draft_head; upstream
     // PR #2): saves memory bandwidth per draft call, the verify still decides every token.
+    std::vector<int32_t> compact_ids;
+    int64_t eu_ascii_boundary = 0;
     if (use_mtp && model.has_mtp()) {
         const auto t0 = std::chrono::steady_clock::now();
         if (is_filtered) {
             const int64_t max_v = std::min((int64_t)tok.size(), model.dims().vocab);
-            const std::vector<int32_t> compact_ids = vocab_filter::filter_vocabulary(tok, filter_mask, max_v);
+            compact_ids = vocab_filter::filter_vocabulary(tok, filter_spec, max_v, &eu_ascii_boundary);
             model.make_draft_head(compact_ids, /*quantize_q4=*/draft_head_q4, /*G=*/64, /*threads=*/16);
             const double dur_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             slog(LogLevel::Info,
-                 "startup: MTP draft head: compact Q%d filter '%s' retained %lld / %lld tokens (%.1f%%), %.1f MB, made in %.2f s",
-                 model.draft_head_q4().bits, vocab_filter_spec.c_str(), (long long)compact_ids.size(), (long long)model.dims().vocab,
-                 100.0 * (double)compact_ids.size() / (double)model.dims().vocab,
-                 (double)model.draft_head_q4_bytes() / 1e6, dur_s);
-        } else if (draft_head_q4) {
-            const int64_t rows = mtp_vocab > 0 ? mtp_vocab : model.dims().vocab;
-            model.make_draft_head(rows, /*quantize_q4=*/true, /*G=*/64, /*threads=*/16);
-            slog(LogLevel::Info, "startup: MTP draft head: Q4 G64 copy of the first %lld LM head rows, %.1f MB, made in %.2f s",
-                 (long long)rows, (double)model.draft_head_q4_bytes() / 1e6,
-                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+                 "startup: MTP draft head: compact Q%d filter '%s' retained %lld / %lld tokens (%.1f%%), %.1f MB, "
+                 "eu_ascii_start=%lld, made in %.2f s",
+                 model.draft_head_q4().bits, filter_spec.canonical.c_str(), (long long)compact_ids.size(),
+                 (long long)model.dims().vocab, 100.0 * (double)compact_ids.size() / (double)model.dims().vocab,
+                 (double)model.draft_head_q4_bytes() / 1e6, (long long)eu_ascii_boundary, dur_s);
         } else {
-            slog(LogLevel::Info, "startup: MTP draft head: Q4 copy disabled (--draft-head-q4 off); using loaded Q%d LM head directly",
-                 model.lm_head().bits);
+            if (draft_head_q4) {
+                const int64_t rows = model.dims().vocab;
+                model.make_draft_head(rows, /*quantize_q4=*/true, /*G=*/64, /*threads=*/16);
+                slog(LogLevel::Info, "startup: MTP draft head: Q4 G64 copy of all %lld LM head rows, %.1f MB, made in %.2f s",
+                     (long long)rows, (double)model.draft_head_q4_bytes() / 1e6,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+                slog(LogLevel::Warning,
+                     "startup: WARNING: --mtp-vocab-filter is set to 'all' (full %lld-token draft head, %.1f MB): "
+                     "MTP drafting will be slower and you are losing decode tok/s. "
+                     "Read docs/CONFIGURATION.md and configure a filter for your languages (e.g. 'en', 'en+ru', 'en+eu', 'en+ja').",
+                     (long long)rows, (double)model.draft_head_q4_bytes() / 1e6);
+            } else {
+                slog(LogLevel::Info, "startup: MTP draft head: Q4 copy disabled (--draft-head-q4 off); using loaded Q%d LM head directly",
+                     model.lm_head().bits);
+                slog(LogLevel::Warning,
+                     "startup: WARNING: --mtp-vocab-filter is set to 'all' (full %lld-token Q%d draft head): "
+                     "MTP drafting will be slower and you are losing decode tok/s. "
+                     "Read docs/CONFIGURATION.md and configure a filter for your languages (e.g. 'en', 'en+ru', 'en+eu', 'en+ja').",
+                     (long long)model.dims().vocab, model.lm_head().bits);
+            }
         }
     }
+    const std::string calib_vocab_key = vocab_filter::cache_key(filter_spec, compact_ids);
     std::unique_ptr<vision::ServedVision> served_vision;
     if (vision) {
         STRIX_CHECK(model.has_vision(), "fastasfuck_server: vision = on but the model loaded without a tower");
@@ -319,8 +331,9 @@ int run(int argc, char **argv) {
              (long long)cfg.vision_preprocess_limit);
     }
     const int64_t kv_generations = 1;
-    Qwen4ExpBackend backend(model, slot_capacity, chunk, use_mtp, mtp_vocab, precision, kv_format, total_slots,
+    Qwen4ExpBackend backend(model, slot_capacity, chunk, use_mtp, /*mtp_vocab=*/0, precision, kv_format, total_slots,
                             kv_generations);
+    backend.set_draft_vocab_filter(filter_spec.canonical);
     if (total_capacity > 0) backend.set_total_capacity(total_capacity);
     if (kv_precommit) {
         backend.precommit();
@@ -458,7 +471,7 @@ int run(int argc, char **argv) {
         const int draft_head_bits = (model.draft_head().bits > 0) ? model.draft_head().bits : model.lm_head().bits;
         const std::string fp = compute_weights_fingerprint(
             weights, cfg.model_id, draft_head_bits,
-            settings.text("mtp-vocab-filter"), settings.text("gdn-precision"),
+            calib_vocab_key, settings.text("gdn-precision"),
             &strix_h, &fsize, &fmtime,
             static_cast<int>(Qwen4ExpSession::kGroupedMinTokens)
         );
@@ -660,7 +673,7 @@ int run(int argc, char **argv) {
                 p_save.weights_mtime = fmtime;
                 p_save.draft_head_bits = draft_head_bits;
                 p_save.draft_head_q4 = (draft_head_bits == 4);
-                p_save.mtp_vocab_filter = settings.text("mtp-vocab-filter");
+                p_save.mtp_vocab_filter = calib_vocab_key;
                 p_save.gdn_precision = settings.text("gdn-precision");
                 p_save.grouped_min_tokens = static_cast<int>(Qwen4ExpSession::kGroupedMinTokens);
                 p_save.hw = hw_prof;

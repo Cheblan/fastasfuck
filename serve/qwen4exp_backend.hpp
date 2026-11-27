@@ -9,6 +9,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <utility>
 
 namespace strix {
 
@@ -36,6 +38,7 @@ public:
     // /health read it - reaching the last one is the switch-count exhaustion refusal).
     int64_t kv_generation() const { return session_->kv_generation(0); }
     void set_kv_budget(std::function<void(uint64_t)> f);
+    void set_draft_vocab_filter(std::string filter) { draft_vocab_filter_ = std::move(filter); }
     void reset() override { session_->reset(); }
     std::vector<float> forward(const std::vector<int32_t> &ids, bool want_logits) override {
         return session_->forward(ids, want_logits ? 1 : 0);
@@ -234,6 +237,7 @@ private:
     const PrecisionOptions precision_;
     const KvFormat kv_;
     const int64_t n_seqs_, kv_generations_;
+    std::string draft_vocab_filter_;
     std::function<void(uint64_t)> kv_budget_;
     std::unique_ptr<Qwen4ExpSession> session_;
     std::vector<std::vector<Qwen4ExpSnapshot>> snapshots_;  // [seq][snapshot slot]

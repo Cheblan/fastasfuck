@@ -10,41 +10,43 @@ class Tokenizer;
 
 namespace vocab_filter {
 
-enum Section : uint32_t {
-    Core     = 1 << 0,
-    Latin    = 1 << 1,
-    Cyrillic = 1 << 2,
-    Greek    = 1 << 3,
-    Digits   = 1 << 4,
-    Punct    = 1 << 5,
-    Code     = 1 << 6,
-    Cjk      = 1 << 7,
-    Arabic   = 1 << 8,
-    Asian    = 1 << 9,
-    Other    = 1 << 10,
-    All      = 0x7FF
+enum Lang : uint32_t {
+    Core  = 1u << 0,  // Mandatory: added special tokens, 256 raw bytes, whitespace, digits, ASCII/Unicode punct/code, single Greek math letters
+    En    = 1u << 1,  // Mandatory base: English/code ASCII-Latin (Epoch 1)
+    Eu    = 1u << 2,  // European Latin: Epoch-3 multilingual ASCII-Latin + European diacritics
+    Ru    = 1u << 3,  // Cyrillic block (~18.6k)
+    Zh    = 1u << 4,  // Han ideographs + CJK punct/fullwidth
+    Ja    = 1u << 5,  // Kana (Hiragana/Katakana) + CJK punct/fullwidth (tag ja/jp also enables Zh)
+    Ko    = 1u << 6,  // Hangul Syllables/Jamo + CJK punct/fullwidth
+    Ar    = 1u << 7,  // Arabic & Persian (excluding U+FEFF BOM)
+    Other = 1u << 8,  // Vietnamese, Thai, Indic, Greek non-math, Hebrew, rare scripts & Emoji
 };
 
-// Presets
-constexpr uint32_t kPresetAll = Section::All;
-constexpr uint32_t kPresetEnRu = Section::Core | Section::Latin | Section::Cyrillic | Section::Greek |
-                                 Section::Digits | Section::Punct | Section::Code;
-constexpr uint32_t kPresetEn = Section::Core | Section::Latin | Section::Greek | Section::Digits |
-                               Section::Punct | Section::Code;
-constexpr uint32_t kPresetNoCjk = Section::All & ~Section::Cjk;
+struct FilterSpec {
+    bool all = false;
+    uint32_t langs = 0;
+    std::string canonical = "all";
+};
 
-// Parse filter specification string ("all", "en+ru", "en", "no-cjk", or comma-separated list of section names).
-// Crashes immediately with fatal error if 'core' is missing when not "all".
-uint32_t parse_filter(const std::string &spec);
+// Parse '--mtp-vocab-filter' specification string:
+//   - "all" (or "full"): full unfiltered vocabulary
+//   - "en" or '+'-separated tags combined with 'en':
+//       en, eu, ru (alias cyrillic), zh (alias cn), ja (alias jp), ko (alias kr), ar (alias fa), other
+// Throws via STRIX_FAIL on unknown tags, non-'+' delimiters (e.g. ','), missing mandatory 'en'/'core', or mixing with 'all'.
+FilterSpec parse_filter(const std::string &spec_raw);
 
-// Returns true if filter covers all tokens (no filtering needed).
-inline bool is_all(uint32_t mask) {
-    return mask == Section::All;
+inline bool is_all(const FilterSpec &spec) {
+    return spec.all;
 }
 
-// Filter tokenizer tokens up to max_vocab (e.g. min(tok.size(), lm_head.N())).
-// Returns compact_to_vocab: list of original token IDs retained in the compact vocabulary.
-std::vector<int32_t> filter_vocabulary(const Tokenizer &tok, uint32_t mask, int64_t max_vocab);
+// Retain sorted original token IDs in [0, max_vocab) matching `spec`.
+// Crashes immediately (abort) if called on a non-'all' spec missing Core or En.
+// If out_eu_ascii_start != nullptr, writes the auto-detected multilingual Epoch-3 ASCII-Latin start ID.
+std::vector<int32_t> filter_vocabulary(const Tokenizer &tok, const FilterSpec &spec, int64_t max_vocab,
+                                       int64_t *out_eu_ascii_start = nullptr);
+
+// Deterministic calibration cache key segment combining canonical spec, row count, and 64-bit hash of retained IDs.
+std::string cache_key(const FilterSpec &spec, const std::vector<int32_t> &ids);
 
 }  // namespace vocab_filter
 }  // namespace strix

@@ -222,7 +222,18 @@ std::string Qwen4ExpBackend::describe() const {
            kernels::act_name(model_.act()) + ", capacity " + std::to_string(capacity()) + ", chunk " +
            std::to_string(max_chunk()) + ", precision " + session_->precision().describe() + ", kv " +
            kv_format_name(session_->kv_format()) +
-           (has_mtp() ? ", mtp (draft vocabulary " + std::to_string(session_->mtp_vocab()) + ")" : "") +
+           (has_mtp() ? [&] {
+               const bool compact = !model_.compact_to_vocab().empty();
+               std::string s = ", mtp (draft vocabulary ";
+               if (compact) {
+                   s += std::to_string(model_.compact_to_vocab().size()) + "/" + std::to_string(model_.dims().vocab);
+               } else {
+                   s += std::to_string(session_->mtp_vocab());
+               }
+               if (!draft_vocab_filter_.empty()) s += ", filter=" + draft_vocab_filter_;
+               s += ")";
+               return s;
+           }() : std::string()) +
            (model_.has_vision() ? ", vision tower on" : "") + [&] {
                const NgramTableRows *t = ngram_table();
                return t ? ", n-gram row cache " + std::to_string(t->cache_rows()) + " rows" : std::string();
