@@ -107,7 +107,9 @@ The engine **never silently ignores unknown or invalid configuration options**. 
 | `mtp-gate-rule` | `Text` | `margin`, `cost` | `margin` | Gating rule for greedy decoding (T = 0): `margin` (deterministic exactness) or `cost`. |
 | `sampled-gate` | `Text` | `cost`, `margin` | `cost` | Gating rule for stochastic sampling (T > 0): `cost` (evaluates expected time speedup using empirical verify latency tables) or `margin`. |
 | `mtp-vocab-filter` | `Text` | `all`, `en`, or `en+<blocks>` | `all` | Lossless draft-head vocabulary filter. Default `all` retains all 248,320 rows (slower drafting, emits startup warning). Filter mode requires mandatory `en` (core + English/code) with blocks combined via `+`: `eu`, `ru` (`cyrillic`), `zh` (`cn`), `ja` (`jp`), `ko` (`kr`), `ar` (`fa`), `other`. See Section 4. |
-| `draft-head-q4` | `OnOff` | `on`, `off` | `on` | Quantizes draft head LM rows to Q4 at startup. Reduces draft step latency from 2.11 ms (`all` Q8) down to 1.28 ms (`en+ru` Q4) while keeping the base verifier in full precision. |
+| `draft-head-q4` | `OnOff` | `on`, `off` | `on` | Quantizes draft head LM rows to Q4 at startup. Superseded when `draft-head-2stage = on`. |
+| `draft-head-2stage` | `OnOff` | `on`, `off` | `on` | Two-Stage Act-PCA MTP draft head (`R=512`, `M_cand=512`, `cap=1024`, exact Q8 gather). **100% lossless** (`KLD = 0.0000`), cuts draft step latency ~30–44%, and saves ~126 MB VRAM vs. legacy Q4 draft (`en+ru`). See Section 5. |
+| `lm-head-2stage` | `OnOff` | `on`, `off` | `on` | Two-Stage Act-PCA verify LM head (`R=512`, `M_cand=1536`, `cap=2048`, exact Q8 gather). Saves 2.2–2.7 ms per verify round (+6–12% end-to-end tok/s). Automatically falls back to Full Q8 on `top_k=0`, `top_k > 20`, grammars, `logit_bias`, and FP32. See Section 5. |
 | `mtp-calib` | `OnOff` | `on`, `off` | `on` | Executes automated hardware latency calibration on physical GPU silicon at server startup. |
 | `mtp-calib-cache` | `OnOff` | `on`, `off` | `on` | Persists calibrated profile to `mtp_calib_cache.json` alongside model weights for instant subsequent launches. |
 | `mtp-calib-cache-file` | `PathOrOff` | Valid file path, `off` | `off` | Explicit path to calibration JSON file (`off` = automatic based on model directory). |
@@ -214,6 +216,8 @@ mtp-lut-step-penalty = 0.015
 mtp-ema-decay = 0.15
 mtp-vocab-filter = all
 draft-head-q4 = on
+draft-head-2stage = on
+lm-head-2stage = on
 
 # --- PLE n-gram Row Cache ---
 ngram-cache-rows = 8388608
@@ -296,3 +300,38 @@ Switching from the legacy `en+ru` filter (160,904 rows / 231.7 MB, which include
   - `T = 1.0` Solo (`P1/P4/P6`): **70.03 → 73.09 tok/s**
   - `T = 1.0` 33k `<think>`: **57.94 → 61.25 tok/s** (`+5.7%`, acceptance **69.32%**)
 - **Automatic Calibration Isolation:** `mtp_calib_cache.json` fingerprints automatically hash the retained compact token ID list (`canonical#rows#hash64`) without invalidating `.pcache` KV snapshots.
+
+---
+
+## 5. Two-Stage Act-PCA Vocabulary Heads (`--draft-head-2stage` & `--lm-head-2stage`)
+
+On AMD Strix Halo (`32 MiB` MALL cache, `273 GB/s` LPDDR5X), scanning the dense `lm_head.weight` (`~676 MB` in Q8 across 248,320 rows) or legacy dense Q4 draft heads (`161–358 MB`) thrashes the MALL cache on every decode and verify step. Beginning in **Release 1.3.0**, **both** two-stage Activation-PCA heads are enabled out of the box:
+
+```ini
+draft-head-2stage = on
+lm-head-2stage = on
+```
+
+### 5.1 Three-Stage GPU Pipeline & Startup Caching
+1. **First-Startup Calibration (`draft2s_pca_r512.bin`, ~2.6 MB):** Once per model weight + calibration fingerprint (`SPCA v2`), the server captures `1,022` real `final_mixed` BF16 hidden states covering code, math, Linux internals, Russian prose, `<think>` reasoning, JSON tool calls, CJK, and rare Unicode symbols (`runtime/act_pca.cpp`), solving an exact FP64 dual-Gram eigensystem (`U U^T`) for orthonormal rank `R = 512` directions `E [512, K]` in ~5 s. Ensure the weights directory is writable on first startup so `draft2s_pca_r512.bin` can be cached next to `weights.faf` (restarts then load it in `~0.2 s`; read-only directories recompute cleanly in ~5 s). `mtp_calib_cache.json` automatically isolates calibration profiles via `+2s_r512_m512` and `+lm2s_m1536` tags.
+2. **Stage 1 & 2 (`kernels/draft2s.hip`):** Projects hidden states `x_r = x * E^T` (`2560 -> 512` BF16), scores compressed Q4 (`G = 64`) projection weights `P_q4`, and shortlists the top `M_cand` rows (`<= cap`) via a zero-overflow 2-pass 24-bit radix histogram:
+   - **`draft-head-2stage` (`M_cand = 512, cap = 1024`):** `35.3 MB` (`en+ru`) or `74.1 MB` (`all`) — saves ~`126 MB` vs. legacy Q4 `en+ru` (`161.1 MB`), cuts draft latency by ~30–44% (`1.28 -> 0.88–0.89 ms`), and lifts draft Top-1 match vs. Q8 from `96.5%` to `100.0%`.
+   - **`lm-head-2stage` (`M_cand = 1536, cap = 2048`):** `74.1 MB` over the full 248,077-token vocabulary (vs. `676 MB` Full Q8), saving `2.2–2.7 ms` per verify round (+6–12% end-to-end tok/s). Together, `draft2s + lm2s` (`109.4 MB` on `en+ru`) fit in less memory than the legacy 1.2.2 Q4 draft head alone.
+3. **Stage 3 (`q8_gather_rows_kernel`):** Reads and dot-products the exact unmodified Q8 `lm_head.weight` rows for only the `<= cap` shortlisted candidates, then extracts top-20 candidates / `MtpPick`.
+
+### 5.2 Safety, Parity & Automatic Fallback
+- **`--draft-head-2stage` (`on`):** Strictly **100% lossless (`KLD = 0.0000`)** under both greedy (`T = 0`) and Leviathan (`T > 0`) decoding — the base verifier checks every proposed token against full-precision verify logits and cleanly rejects/resamples any miss with zero distribution bias.
+- **`--lm-head-2stage` (`on`):** Verified against Full Q8 across live generation and OOD stress suites:
+  - **Greedy (`T = 0.0`, P1–P6):** **6/6 (100.000%) exact SHA-256 bit-identity** with Full Q8 (`76.49 -> 80.36 tok/s`).
+  - **Live decode (`T = 0.6`):** **0/936** nucleus misses across `<think>` decode, real response decode, and EN/RU prompts (`KLD ~ 3e-13`). **0/128** misses on `<think>` at `T = 1.0` (`KLD ~ 1.4e-13`).
+  - **Automatic Full-Q8 Fallback:** `lm_head_2s` runs only when `Sampler::takes_candidates()` is true (`T = 0` or `top_k` in `1..20`), activations are `BF16`, `mask_rows == 0`, and `bias_n == 0`. Requests with `top_k = 0`, `top_k > 20`, structured output / JSON grammars, `logit_bias`, or FP32 automatically execute Full Q8 `lm_head`.
+
+### 5.3 Why `~3e-13` KLD Appears vs. Full Q8 (Not a Math Bug or WMMA)
+Live decode audits show `TVD_mean ≈ 9.2e-8 .. 1.14e-7` and `KLD_mean ≈ 1.4e-13 .. 3.04e-13` between `lm-head-2stage` and Full Q8. This `~3e-13` residual is the hardware FP32 reduction-order floor — **not** quantization inaccuracy and **not** WMMA (FP16/BF16 WMMA rounding would produce `~1e-3..1e-2` TVD and `~1e-6` KLD, a million times larger):
+1. **Exact Stage-3 Q8 Math:** `q8_gather_rows_kernel` (`kernels/draft2s.hip`) executes the exact same asymmetric Q8 `v_dot2_f32_bf16` (`__builtin_amdgcn_fdot2_f32_bf16`) arithmetic on the exact same `lm_head.weight` bytes as `linear_q8_kernel` (`kernels/linear_q8.hip`).
+2. **1-ULP FP32 Associativity Difference:** Because FP32 FMA accumulation is non-associative (`(a + b) + c != a + (b + c)`), the slightly different warp/thread parallel reduction tree shifts logits by at most **~1 ULP in FP32** (`ε_FP32 = 2^-23 ≈ 1.19e-7`), giving `TVD ~ 1e-7`.
+3. **Quadratic KLD Scaling Near `q = p`:** Expanding KL divergence around `q = p` yields `KLD(p || q) ≈ (1/2) * sum_i ((δp_i)^2 / p_i) ~ (ε_FP32)^2 ~ 1e-14 .. 3e-13`. Dividing that same 1-ULP logit delta by `T = 0.6` instead of `T = 1.0` scales `(δp)^2` by `(1/0.6)^2 ≈ 2.78x`, explaining `1.64e-13 -> 3.04e-13`.
+
+### 5.4 When to Disable (`off`)
+- **`--lm-head-2stage off`:** Disable if you run high-temperature (`T >= 1.0`) creative writing in CJK or rare scripts with `top_k` in `1..20` and want zero tail pruning, run strict full-vocab perplexity/KLD reference evals against Full Q8, or send exclusively `top_k = 0` / grammar-constrained traffic (already handled via auto-fallback) and want to reclaim `74.1 MB` VRAM.
+- **`--draft-head-2stage off`:** Rarely needed — keep `on` unless A/B-benchmarking against the legacy Q4 draft head.

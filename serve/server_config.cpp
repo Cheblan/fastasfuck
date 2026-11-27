@@ -367,10 +367,11 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
          "MTP draft head: quantize a Q4 copy of the draft vocabulary's LM head rows at load for faster drafting; "
          "off uses the loaded Q8 LM head directly"},
         {"draft-head-2stage", K::OnOff, 0, 0, "on",
-         "MTP draft head: two-stage Act-PCA (R=512, M=512) + exact Q8 gather (faster & higher accuracy than Q4; "
+         "Two-stage Act-PCA MTP draft head (R=512, M=512, exact Q8 gather; lossless, saves ~126 MB VRAM vs Q4; "
          "off falls back to dense Q4/Q8)"},
-        {"lm-head-2stage", K::OnOff, 0, 0, "off",
-         "Verify LM head: two-stage Act-PCA (R=512, M=1536) + exact Q8 gather when unmasked/unbiased candidates are requested"},
+        {"lm-head-2stage", K::OnOff, 0, 0, "on",
+         "Two-stage Act-PCA verify LM head (R=512, M=1536, exact Q8 gather; auto-fallback on top_k=0/>20, grammars, "
+         "logit_bias, FP32; off forces full Q8)"},
         {"ngram-cache-rows", K::Int, 0, 1 << 26, std::to_string(kServedNgramCacheRows),
          "the n-gram table's LRU row cache in rows (320 B each, plus index); 0 = none"},
         {"log-level", K::Text, 0, 0, "info",

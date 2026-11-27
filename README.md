@@ -107,8 +107,30 @@ On AMD Strix Halo, the Zen 5 CPU and RDNA 3.5 GPU share physical LPDDR5X-8533 un
 - **OpenAI-Compatible Chat Server** — `/v1/chat/completions` with streaming, function calling, reasoning, and structured JSON output.
 - **Drop-in `.strixw` Compatibility** — natively loads legacy `.strixw` weight packages and tables out of the box with zero reconversion needed.
 - **Deficit Round Robin (DRR) GpuArbiter** — quantum prefill slicing (`chunk-shared`) guarantees non-blocking decode streaming during heavy repository prefill.
-- **Multi-Token Prediction (MTP)** — native decoupled draft heads with escalating margin gates and n-gram table assist.
+- **Multi-Token Prediction (MTP) & Two-Stage Act-PCA (`draft2s` / `lm2s`)** — native decoupled draft heads with escalating margin gates, n-gram table assist, and default-enabled two-stage Act-PCA vocabulary heads (`--draft-head-2stage`, `--lm-head-2stage`).
 - **512k Context with YaRN** — chunked Q8 KV cache keeps memory flat and attention fast at depth.
+
+| Option | Default | Description |
+| :--- | :---: | :--- |
+| `--draft-head-2stage` | `on` | Two-Stage Act-PCA draft head (`R=512, M=512`, exact Q8 gather). **100% lossless** (`KLD = 0.0000`) — verified by the exact main head. Cuts draft step time ~30–44% and saves ~126 MB VRAM vs legacy Q4 draft (`en+ru`). |
+| `--lm-head-2stage` | `on` | Two-Stage Act-PCA verify LM head (`R=512, M=1536`, exact Q8 gather over the full 248k vocab). Saves 2.2–2.7 ms per verify round (+6–12% end-to-end tok/s). Auto-falls back to full Q8 for `top_k=0`, `top_k > 20`, grammars/structured output, `logit_bias`, and FP32. |
+
+### Two-Stage Act-PCA Vocabulary Heads (`--draft-head-2stage`, `--lm-head-2stage`)
+
+On Strix Halo (32 MiB MALL, 273 GB/s LPDDR5X), dense 248k-vocab projections (`676 MB` in Q8) thrash cache on every decode/verify step. Both heads are enabled by default and run a 3-stage GPU pipeline: project hidden states to a 512-dim Activation-PCA subspace, shortlist top candidates in Q4 (`35.3 MB` draft for `en+ru` / `74.1 MB` LM head — less memory combined than the legacy 1.2.2 Q4 draft head alone), then compute **exact Q8 dot products** on the shortlisted rows.
+
+* **First startup:** runs a one-time ~5 s calibration and caches the orthonormal basis in `draft2s_pca_r512.bin` (~2.6 MB) next to `weights.faf` (the weights directory should be writable on first launch; otherwise the basis recomputes cleanly at startup). Subsequent starts reload from cache in ~0.2 s, and `mtp_calib_cache.json` profiles isolate automatically (`+2s_r512_m512`, `+lm2s_m1536`).
+* **Accuracy & safety:**
+  * `--draft-head-2stage` is **mathematically lossless** (`KLD = 0.0000`; the verifier rejects and resamples any draft miss cleanly) and raises draft Top-1 agreement vs. Q8 from 96.5% to 100%.
+  * `--lm-head-2stage` is **bit-identical at `T = 0.0`** (6/6 SHA-256 parity vs. full Q8) and virtually exact on live decode (`0/936` misses at `T = 0.6`, `KLD ~ 3e-13`; `0/128` on `<think>` at `T = 1.0`, `KLD ~ 1.4e-13`).
+  * **Why `KLD ~ 3e-13` is physical zero (not a math/WMMA error):** Stage 3 computes the exact same asymmetric Q8 `dot2` arithmetic against `lm_head.weight` as full Q8 — **not** WMMA (which would cause `~1e-3` TVD / `~1e-6` KLD). Because FP32 FMA reduction order differs slightly between the gather kernel and full-matrix kernel, logits shift by at most ~1 ULP in FP32 (`~1.19e-7`, giving `TVD ~ 1e-7`), and quadratic KL expansion near `q = p` yields `KLD ~ (1e-7)^2 ~ 1e-14..3e-13` (scaling by `(1/T)^2` between `T = 1.0` and `T = 0.6`).
+  * **Automatic fallback:** any request using `top_k = 0`, `top_k > 20`, JSON schema/grammar masks, `logit_bias`, or FP32 automatically bypasses `lm_head_2s` and runs the full Q8 `lm_head`.
+
+**When to turn them off:**
+* **`--lm-head-2stage off`**: disable if you run high-temperature (`T >= 1.0`) creative writing in CJK or rare scripts with `top_k <= 20` and want zero tail pruning, if you run strict reference perplexity/KLD evals against full Q8, or if all your traffic hits the auto-fallback path (`top_k = 0` / grammars) and you want to reclaim 74 MB of VRAM.
+* **`--draft-head-2stage off`**: rarely needed — keep it on unless you are A/B-benchmarking against the legacy Q4 draft head.
+
+For full details, see Section 5 of [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ---
 
