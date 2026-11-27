@@ -1528,11 +1528,17 @@ void Engine::run(Job &job, Slot &sl) {
                     const float c_draft = mtp_cfg.hw_profile.get_draft_cost(m, (int)slots_.size()) * sd;
                     const float delta_T = (c_draft / (float)m) + delta_verify;
 
-                    // Stage 1: Pre-draft optimistic check (Cost mode only)
-                    // Under Renewal-Reward criterion, if even optimistic p_{k+1} = 1.0 satisfies
-                    // P_cum * tau_global <= delta_T, drafting token k+1 cannot improve global throughput.
+                    // Stage 1: Pre-draft check (Cost mode only)
+                    // Under Renewal-Reward Bellman option value, Auto LUT tests expected net benefit over the
+                    // unbiased seen_bins distribution against draft step cost; Static keeps optimistic p=1.0 check.
                     if (active_gate == Options::MtpGateRule::Cost) {
-                        if (P_cum * tau_global <= delta_T) {
+                        if (is_auto_lut) {
+                            const float draft_cost_eff = c_draft / (float)m;
+                            if (active_lut.expected_option_value(mtp_regime, step, P_cum, tau_global, delta_verify) <=
+                                draft_cost_eff) {
+                                break;
+                            }
+                        } else if (P_cum * tau_global <= delta_T) {
                             break;
                         }
                     }
@@ -1554,6 +1560,20 @@ void Engine::run(Job &job, Slot &sl) {
                     res.mtp_draft_ms += std::chrono::duration<double, std::milli>(t_draft_end - t_draft_start).count();
                     ++res.mtp_draft_calls;
                     STRIX_CHECK(!t.nan, "Engine: NaN in the MTP draft logits (step ", step, ")");
+
+                    const float delta_logits = t.best_v - t.second_v;
+                    const float draft_conf = leviathan
+                        ? sampler.draft_entropy_confidence(draft_cands.v, draft_cands.id,
+                                                           LmBackend::MtpDraftCands::kCands, draft_cands.nan)
+                        : 1.0f;
+                    const int lut_bin = leviathan
+                        ? OnlineMtpLut::bin_for_prob(draft_conf)
+                        : ((t.p_top1 > 0.0f) ? OnlineMtpLut::bin_for_prob(t.p_top1)
+                                             : OnlineMtpLut::bin_for_delta_logits(delta_logits));
+                    if (is_auto_lut && active_gate == Options::MtpGateRule::Cost) {
+                        active_lut.observe_seen(mtp_regime, step, lut_bin);
+                    }
+
                     int32_t d = t.best;
                     if (leviathan) {
                         const double t_draft_step =
@@ -1573,14 +1593,9 @@ void Engine::run(Job &job, Slot &sl) {
                         draft_at = so->after(draft_at, d);
                     }
 
-                    const float delta_logits = t.best_v - t.second_v;
-                    const int lut_bin = leviathan
-                        ? OnlineMtpLut::bin_for_prob(sampler.draft_entropy_confidence(
-                              draft_cands.v, draft_cands.id, LmBackend::MtpDraftCands::kCands, draft_cands.nan))
-                        : ((t.p_top1 > 0.0f) ? OnlineMtpLut::bin_for_prob(t.p_top1)
-                                             : OnlineMtpLut::bin_for_delta_logits(delta_logits));
                     if (active_gate == Options::MtpGateRule::Cost) {
-                        // Stage 2: Post-draft actual cost check via OnlineMtpLut (auto) or calibrated sigmoid (static)
+                        // Stage 2: Post-draft commit check (sunk-cost fix for Auto LUT: c_draft is already spent,
+                        // so keeping `d` only pays incremental delta_verify)
                         float p_next = 0.5f;
                         if (is_auto_lut) {
                             p_next = active_lut.cond_prob(mtp_regime, step, lut_bin);
@@ -1590,7 +1605,7 @@ void Engine::run(Job &job, Slot &sl) {
                         }
                         const float P_cum_next = P_cum * p_next;
 
-                        if (P_cum_next * tau_global <= delta_T) {
+                        if (P_cum_next * tau_global <= (is_auto_lut ? delta_verify : delta_T)) {
                             // Marginal addition does not improve global throughput (Renewal-Reward criterion)
                             break;
                         }
