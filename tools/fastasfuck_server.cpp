@@ -454,10 +454,18 @@ int run(int argc, char **argv) {
     if (want_draft_2s || want_lm_2s) {
         constexpr int64_t kPcaRank = 512;
         const auto t_2s0 = std::chrono::steady_clock::now();
+        const std::string cal_text = default_act_pca_calibration_text();
+        uint64_t cal_hash = 14695981039346656037ULL;
+        for (unsigned char c : cal_text) {
+            cal_hash ^= c;
+            cal_hash *= 1099511628211ULL;
+        }
+        char cal_tag[48];
+        std::snprintf(cal_tag, sizeof(cal_tag), "act_pca_r512_v2_%016llx", (unsigned long long)cal_hash);
         uint64_t pca_h = 0, pca_fs = 0;
         int64_t pca_mt = 0;
         const std::string pca_fp = compute_weights_fingerprint(
-            weights, cfg.model_id, 8, "act_pca_r512", settings.text("gdn-precision"), &pca_h, &pca_fs, &pca_mt,
+            weights, cfg.model_id, 8, cal_tag, settings.text("gdn-precision"), &pca_h, &pca_fs, &pca_mt,
             static_cast<int>(Qwen4ExpSession::kGroupedMinTokens));
         std::string pca_dir = weights;
         const size_t pca_slash = pca_dir.rfind('/');
@@ -467,7 +475,7 @@ int run(int argc, char **argv) {
         std::vector<uint16_t> e_bf16;
         const bool pca_hit = load_act_pca_cache(pca_cache_path, pca_fp, kPcaRank, model.dims().d, e_bf16);
         if (!pca_hit) {
-            const std::vector<int32_t> cal_ids = tok.encode(default_act_pca_calibration_text());
+            const std::vector<int32_t> cal_ids = tok.encode(cal_text);
             const std::vector<uint16_t> u_cal =
                 backend.session().capture_calibration_hidden_states(cal_ids, use_mtp && model.has_mtp() ? 64 : 0);
             const int64_t n_cal = (int64_t)u_cal.size() / model.dims().d;
@@ -488,17 +496,17 @@ int run(int argc, char **argv) {
         }
         if (want_lm_2s) {
             const auto t_lm0 = std::chrono::steady_clock::now();
-            model.make_lm_head_2s(e_bf16, kPcaRank, /*M_cand=*/1024, /*cap=*/1536, /*threads=*/16);
+            model.make_lm_head_2s(e_bf16, kPcaRank, /*M_cand=*/1536, /*cap=*/2048, /*threads=*/16);
             const double lm_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_lm0).count();
             slog(LogLevel::Info,
-                 "startup: verify LM head: two-stage Act-PCA (R=%lld, M=1024, exact Q8 gather) %.1f MB, built in %.2f s",
+                 "startup: verify LM head: two-stage Act-PCA (R=%lld, M=1536, exact Q8 gather) %.1f MB, built in %.2f s",
                  (long long)kPcaRank, (double)model.lm_head_2s_bytes() / 1e6, lm_s);
         }
     }
     const std::string calib_vocab_key =
         vocab_filter::cache_key(filter_spec, compact_ids) +
         (model.has_draft_head_2s() ? "+2s_r512_m512" : "") +
-        (model.has_lm_head_2s() ? "+lm2s" : "");
+        (model.has_lm_head_2s() ? "+lm2s_m1536" : "");
 
     MtpHardwareProfile hw_prof;
     hw_prof.draft_step_ms = (float)settings.number("mtp-draft-ms");

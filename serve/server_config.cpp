@@ -370,7 +370,7 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
          "MTP draft head: two-stage Act-PCA (R=512, M=512) + exact Q8 gather (faster & higher accuracy than Q4; "
          "off falls back to dense Q4/Q8)"},
         {"lm-head-2stage", K::OnOff, 0, 0, "off",
-         "Verify LM head: two-stage Act-PCA (R=512, M=1024) + exact Q8 gather when unmasked/unbiased candidates are requested"},
+         "Verify LM head: two-stage Act-PCA (R=512, M=1536) + exact Q8 gather when unmasked/unbiased candidates are requested"},
         {"ngram-cache-rows", K::Int, 0, 1 << 26, std::to_string(kServedNgramCacheRows),
          "the n-gram table's LRU row cache in rows (320 B each, plus index); 0 = none"},
         {"log-level", K::Text, 0, 0, "info",

@@ -4148,7 +4148,6 @@ int64_t Qwen4ExpSession::mtp_batch_body(const std::vector<MtpDraftRun> &runs) {
     const char *fn = "Qwen4ExpSession::mtp_batch_body";
     if (runs.empty()) return 0;
     mtp_batch_trunk(runs);
-    const Qwen4ExpDims &D = m_.dims();
     const Act act = m_.act();
     const int64_t T = (int64_t)runs.size();
     const QWeightView &draft = m_.draft_head_q4();

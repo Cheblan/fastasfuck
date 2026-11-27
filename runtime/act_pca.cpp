@@ -282,7 +282,7 @@ bool load_act_pca_cache(const std::string &path, const std::string &fingerprint,
         std::fclose(fp);
         return false;
     }
-    if (std::memcmp(h.magic, "SPCA", 4) != 0 || h.version != 1 || h.R != R || h.K != K ||
+    if (std::memcmp(h.magic, "SPCA", 4) != 0 || h.version != 2 || h.R != R || h.K != K ||
         h.fp_len != (uint32_t)fingerprint.size()) {
         std::fclose(fp);
         return false;
@@ -314,7 +314,7 @@ void save_act_pca_cache(const std::string &path, const std::string &fingerprint,
     if (!fp) return;
     CacheHeader h{};
     std::memcpy(h.magic, "SPCA", 4);
-    h.version = 1;
+    h.version = 2;
     h.R = R;
     h.K = K;
     h.fp_len = (uint32_t)fingerprint.size();
@@ -329,51 +329,61 @@ void save_act_pca_cache(const std::string &path, const std::string &fingerprint,
 std::string default_act_pca_calibration_text() {
     return
         "<|im_start|>user\n"
-        "Write an asynchronous Python 3.12 task execution DAG using asyncio with cycle detection and semaphore bounds.\n"
+        "Write an asynchronous Python 3.12 task DAG using asyncio with cycle detection and semaphore bounds.\n"
         "<|im_end|>\n"
         "<|im_start|>assistant\n"
         "<think>\n"
-        "Let's design a clean DAG executor using topological sorting via Kahn's algorithm and asyncio.TaskGroup or create_task.\n"
-        "Each task node tracks in_degree and downstream dependents. We wrap coroutine execution with asyncio.wait_for and a shared asyncio.Semaphore(max_concurrent_tasks).\n"
-        "If an upstream task raises an exception, we propagate cancellation cleanly to all reachable descendants while letting sibling independent branches finish normally.\n"
+        "We sort nodes topologically via Kahn's algorithm, guard concurrency with asyncio.Semaphore, "
+        "and cancel downstream dependents on exception while independent branches finish normally.\n"
         "</think>\n"
         "```python\n"
         "from __future__ import annotations\n"
         "import asyncio\n"
-        "from collections import deque\n"
-        "from dataclasses import dataclass, field\n"
-        "\n"
+        "from dataclasses import dataclass\n"
         "@dataclass\n"
         "class DagNode:\n"
         "    name: str\n"
         "    deps: tuple[str, ...] = ()\n"
-        "    timeout: float = 10.0\n"
-        "    async def execute(self, results: dict[str, object]) -> object:\n"
+        "    async def execute(self, res: dict[str, object]) -> object:\n"
         "        await asyncio.sleep(0.01)\n"
-        "        return {d: results[d] for d in self.deps}\n"
+        "        return {d: res[d] for d in self.deps}\n"
         "```\n"
         "<|im_end|>\n"
         "<|im_start|>user\n"
-        "State and prove the Riemann-Lebesgue Lemma for f in L1(R), plus explain Linux x86_64 4-level page table translation.\n"
+        "Prove the Riemann-Lebesgue Lemma for f in L1(R) and outline x86_64 4-level page table translation.\n"
         "<|im_end|>\n"
         "<|im_start|>assistant\n"
         "<think>\n"
-        "First, recall the Fourier transform convention: \\(\\hat{f}(\\xi) = \\int_{-\\infty}^{\\infty} f(x) e^{-i\\xi x}\\,dx\\). Since simple step functions are dense in L1(R), for any \\(\\varepsilon > 0\\) we pick a finite linear combination of indicator functions \\(g = \\sum_{k=1}^M c_k \\mathbf{1}_{[a_k, b_k]}\\) with \\(\\|f - g\\|_{L^1} < \\varepsilon/2\\). By triangle inequality, |f_hat(xi)| <= ||f - g||_1 + sum |c_k| * 2/|xi| -> 0 as |xi| -> infinity.\n"
-        "Second, on x86_64 with 48-bit canonical virtual addresses: bits [47:39] index PGD (512 entries via CR3), [38:30] index PUD, [29:21] index PMD, [20:12] index PTE, and [11:0] form the 4 KiB page offset. When the TLB misses or shoots down across SMP cores via IPIs, the hardware page walker reads physical addresses directly; missing or read-only COW pages trap into do_page_fault -> handle_mm_fault.\n"
+        "For \\(\\hat{f}(\\xi)=\\int f(x)e^{-i\\xi x}dx\\), step functions \\(g=\\sum c_k\\mathbf{1}_{[a_k,b_k]}\\) are dense in L1(R): "
+        "\\(|\\hat{f}(\\xi)|\\le\\|f-g\\|_1+\\sum|c_k|\\cdot 2/|\\xi|\\to 0\\). On x86_64, 48-bit VAs index PGD[47:39], PUD[38:30], PMD[29:21], PTE[20:12], "
+        "offset[11:0] starting at CR3; TLB shootdowns use SMP IPIs and faults enter do_page_fault -> handle_mm_fault (COW/anon).\n"
         "</think>\n"
-        "Theorem (Riemann-Lebesgue Lemma): Let f in L^1(R). Then lim_{|xi| -> inf} |integral_R f(x) e^{-i xi x} dx| = 0.\n"
         "<|im_end|>\n"
         "<|im_start|>user\n"
-        "Переведи на профессиональный русский научно-технический язык и проанализируй работу двухступенчатой проекции словаря (SVD/Act-PCA) на AMD Strix Halo (gfx1151, 32 MiB MALL).\n"
+        "Переведи на научный русский язык и верни JSON-вызов для метеоархива и мультиязычной сводки.\n"
         "<|im_end|>\n"
         "<|im_start|>assistant\n"
         "<think>\n"
-        "На унифицированной памяти LPDDR5X (273 ГБ/с) чтение плотной матрицы LM-головы занимает заметную долю шага спекулятивного декодирования MTP. Если проецировать скрытое состояние в базис главных компонент активаций ранга R=512 (матрица предпросмотра P_q4 укладывается в ~31 МиБ кэша MALL), а затем отбирать топ-512 кандидатов точной 24-битной гистограммой и пересчитывать для них точные Q8-логиты, сохраняется 100% совпадение Top-1 и ~99.99% распределения при двукратном-трёхкратном ускорении этапа.\n"
-        "Также стоит учитывать вызов инструмента:\n"
+        "В распределённых базах данных и астрофизическом моделировании проекция активаций в ортонормированный базис сохраняет точное ранжирование топ-кандидатов. Подготовим вызов инструмента.\n"
         "</think>\n"
         "<tool_call>\n"
-        "{\"name\": \"inspect_kernel_metrics\", \"arguments\": {\"device\": \"gfx1151\", \"mall_mb\": 32, \"include_hist\": true}}\n"
+        "{\"name\": \"fetch_weather_bulletin\", \"arguments\": {\"station\": \"NO-OSL-42\", \"iso_date\": \"2025-09-14\", \"fields\": [\"pressure_hpa\", \"wind_kt\"], \"strict\": true}}\n"
         "</tool_call>\n"
+        "{\"status\": 200, \"ledger_id\": \"acc_78412\", \"checksum\": \"a94a8fe5ccb19ba61c4c\", \"token_b64\": \"QWxhZGRpbjpvcGVuIHNlc2FtZQ==\"}\n"
+        "天文学家利用高精度光谱仪观测遥远星系的红移效应，并通过分布式关系型数据库的B+树索引加速海量星表检索与气象雷达回波分析。"
+        "編譯器在進行暫存器配置時會建構干擾圖並透過著色演算法減少記憶體溢出。"
+        "人工衛星の軌道計算では大気抵抗と重力摂動を数値積分で解き、コンパイラの静的単一代入形式と組み合わせて高速化する。"
+        "기상 예보 시스템은 수치 모델과 다중 버전 동시성 제어 데이터베이스를 결합하여 관측 자료를 실시간으로 처리한다.\n"
+        "في قواعد البيانات العلائقية، يضمن فهرس الشجرة المتوازنة سرعة الاستعلام وتكامل المعاملات. "
+        "Στη θεωρία πληροφορίας ισχύει ∀x∈ℝⁿ, ∃λ>0 : ∥Ax−b∥₂ ≤ ∂f/∂t ⊕ ∑ᵢ αᵢ⊗βᵢ. "
+        "במערכות קבצים מבוזרות, שכפול הנתונים שומר על עקביות. "
+        "खगोलीय वेधशालाओं में तारों के स्पेक्ट्रम का सटीक विश्लेषण किया जाता है। "
+        "การพยากรณ์อากาศอาศัยข้อมูลดาวเทียมและการคำนวณเชิงตัวเลขอย่างต่อเนื่อง\n"
+        "┌──────┬────────┐\n"
+        "│ Node │ Status │\n"
+        "├──────┼────────┤\n"
+        "│ DB01 │ OK ✓ ☀ │\n"
+        "└──────┴────────┘ α≠β ⇒ ∞ ⊥ ∈ ℂ\n"
         "<|im_end|>\n";
 }
 

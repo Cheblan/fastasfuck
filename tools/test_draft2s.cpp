@@ -139,7 +139,7 @@ void test_draft2s_gpu(hipStream_t stream) {
     // Subset row_map (2048 rows, non-contiguous stride-2 / shuffled)
     std::vector<int32_t> row_map(2048);
     for (int64_t i = 0; i < 2048; ++i) row_map[(size_t)i] = (int32_t)(i * 2 + (i & 1));
-    Q8Weight sub_q8{2048, K, G};
+    Q8Weight sub_q8{2048, K, G, {}, {}, {}};
     sub_q8.q.resize((size_t)(2048 * K));
     sub_q8.scale.resize((size_t)(2048 * (K / G)));
     sub_q8.minv.resize(sub_q8.scale.size());
