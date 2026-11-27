@@ -147,7 +147,9 @@ public:
     static constexpr int kMaxK = 15;    // draft step positions 0..14 (matching --mtp-draft 1..15)
     static constexpr int kBins = 16;    // confidence bins
     static constexpr float kPriorTrials = 8.0f;
+    static constexpr float kLeviathanPriorTrials = 3.5f;
     static constexpr float kGamma = 0.995f;
+    static constexpr float kSeenGamma = 0.99f;
     static constexpr float kProbMin = 0.01f;
     static constexpr float kProbMax = 0.995f;
 
@@ -170,6 +172,8 @@ public:
     static int bin_for_delta_logits(float delta_logits);
 
     float cond_prob(int regime, int64_t step, int bin) const;
+    void observe_seen(int regime, int64_t step, int bin);
+    float expected_option_value(int regime, int64_t step, float p_cum, float tau_global, float delta_verify) const;
     void update(int regime, const DraftObs* obs, size_t count, int accepted, bool ended_or_cut);
 
     uint64_t updates_total() const;
@@ -182,6 +186,7 @@ private:
     mutable std::mutex mu_;
     std::array<std::array<std::array<Cell, kBins>, kMaxK>, kRegimes> cells_{};
     std::array<std::array<std::array<float, kBins>, kMaxK>, kRegimes> prob_mono_{};
+    std::array<std::array<std::array<float, kBins>, kMaxK>, kRegimes> seen_bins_{};
     uint64_t updates_total_ = 0;
 };
 

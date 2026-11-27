@@ -283,20 +283,22 @@ void test_leviathan_prior_mode() {
     OnlineMtpLut levi(OnlineMtpLut::PriorMode::Leviathan);
     OnlineMtpLut argmax(OnlineMtpLut::PriorMode::Argmax);
 
-    // Flat <think> bins (p_top1 < 0.50, r = 3, k = 0) must start optimistic under Leviathan so the cost gate
-    // allows drafting instead of starving at p0 <= 0.375, while Argmax keeps its conservative prior.
+    // Calibrated Leviathan prior (0.30 + 0.65 * bin_mid, kLeviathanPriorTrials = 3.5):
+    // allows initial drafting on moderate uncertainty while quickly adapting down on messy <think> forks.
     STRIX_CHECK(argmax.cond_prob(3, 0, 0) < 0.10f, "argmax prior bin 0 should stay conservative");
-    STRIX_CHECK(levi.cond_prob(3, 0, 0) > 0.55f, "leviathan prior bin 0 expected > 0.55, got ",
-                levi.cond_prob(3, 0, 0));
-    STRIX_CHECK(levi.cond_prob(3, 0, 7) > 0.70f, "leviathan prior bin 7 expected > 0.70, got ",
-                levi.cond_prob(3, 0, 7));
+    const float p0 = levi.cond_prob(3, 0, 0);
+    const float p7 = levi.cond_prob(3, 0, 7);
+    const float p15 = levi.cond_prob(3, 0, 15);
+    STRIX_CHECK(p0 >= 0.25f && p0 <= 0.40f, "leviathan prior bin 0 expected in [0.25, 0.40], got ", p0);
+    STRIX_CHECK(p7 >= 0.55f && p7 <= 0.68f, "leviathan prior bin 7 expected in [0.55, 0.68], got ", p7);
+    STRIX_CHECK(p15 > 0.85f, "leviathan prior bin 15 expected > 0.85, got ", p15);
 
-    // Repeated rejects on bin 0 must still calibrate Leviathan downward while maintaining PAVA monotonicity.
+    // Repeated rejects on bin 0 must quickly adapt Leviathan downward (low kLeviathanPriorTrials) while maintaining PAVA.
     OnlineMtpLut::DraftObs obs[1] = {{0, 0}};
-    for (int i = 0; i < 200; ++i) {
+    for (int i = 0; i < 20; ++i) {
         levi.update(3, obs, 1, /*accepted=*/0, /*ended_or_cut=*/false);
     }
-    STRIX_CHECK(levi.cond_prob(3, 0, 0) < 0.40f, "leviathan bin 0 failed to adapt down after rejects: ",
+    STRIX_CHECK(levi.cond_prob(3, 0, 0) < 0.12f, "leviathan bin 0 failed to adapt down rapidly after rejects: ",
                 levi.cond_prob(3, 0, 0));
     for (int b = 1; b < OnlineMtpLut::kBins; ++b) {
         STRIX_CHECK(levi.cond_prob(3, 0, b) + 1e-6f >= levi.cond_prob(3, 0, b - 1),
@@ -356,6 +358,28 @@ void test_online_draft_temp_tuner() {
                 "regime=2 step=0 must cap at 1.00");
 }
 
+void test_option_value_and_seen_bins() {
+    OnlineMtpLut lut(OnlineMtpLut::PriorMode::Leviathan);
+    const float tau = 14.0f;
+    const float delta_verify = 5.0f;
+    const float c_draft = 1.75f;
+
+    // If all seen tokens come from high confidence bin 15, expected option value is high (> c_draft).
+    for (int i = 0; i < 150; ++i) lut.observe_seen(3, 1, 15);
+    const float ev_high = lut.expected_option_value(3, 1, 1.0f, tau, delta_verify);
+    STRIX_CHECK(ev_high > c_draft, "option value on bin 15 expected > c_draft, got ", ev_high);
+
+    // If subsequent tokens shift heavily to rejected bin 0 (no survivorship bias!), seen_bins EWMA
+    // shifts downward and expected option value drops below c_draft cleanly.
+    const OnlineMtpLut::DraftObs reject0[1] = {{1, 0}};
+    for (int i = 0; i < 40; ++i) lut.update(3, reject0, 1, 0, false);
+    for (int i = 0; i < 400; ++i) lut.observe_seen(3, 1, 0);
+    const float ev_low = lut.expected_option_value(3, 1, 1.0f, tau, delta_verify);
+    const float ev_half = lut.expected_option_value(3, 1, 0.5f, tau, delta_verify);
+    STRIX_CHECK(ev_low < c_draft, "option value on weak bin 0 expected < c_draft, got ", ev_low);
+    STRIX_CHECK(ev_half <= ev_low + 1e-6f, "option value must be monotone in P_cum");
+}
+
 }  // namespace
 
 int main() {
@@ -367,6 +391,7 @@ int main() {
     test_leviathan_prior_mode();
     test_calib_fingerprint_grouped_threshold();
     test_online_draft_temp_tuner();
+    test_option_value_and_seen_bins();
     std::printf("PASS: test_online_mtp_lut\n");
     return 0;
 }

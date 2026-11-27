@@ -360,16 +360,18 @@ OnlineMtpLut::OnlineMtpLut(PriorMode mode) : prior_mode_(mode) {
 void OnlineMtpLut::reset() {
     std::lock_guard<std::mutex> lock(mu_);
     static constexpr float kRegimeScale[kRegimes] = {1.0f, 0.92f, 0.85f, 0.80f};
+    const float prior_trials = (prior_mode_ == PriorMode::Leviathan) ? kLeviathanPriorTrials : kPriorTrials;
     for (int r = 0; r < kRegimes; ++r) {
         for (int k = 0; k < kMaxK; ++k) {
             const float step_decay = std::pow(0.95f, static_cast<float>(k));
             for (int b = 0; b < kBins; ++b) {
                 const float bin_mid = (static_cast<float>(b) + 0.5f) / static_cast<float>(kBins);
                 const float p0 = (prior_mode_ == PriorMode::Leviathan)
-                    ? std::clamp((0.55f + 0.40f * bin_mid) * step_decay, 0.15f, 0.98f)
+                    ? std::clamp((0.30f + 0.65f * bin_mid) * step_decay, 0.15f, 0.98f)
                     : std::clamp(bin_mid * step_decay * kRegimeScale[r], 0.05f, 0.98f);
-                cells_[r][k][b].hits = kPriorTrials * p0;
-                cells_[r][k][b].trials = kPriorTrials;
+                cells_[r][k][b].hits = prior_trials * p0;
+                cells_[r][k][b].trials = prior_trials;
+                seen_bins_[r][k][b] = 0.25f;
             }
             recompute_pava_locked(r, k);
         }
@@ -436,6 +438,32 @@ float OnlineMtpLut::cond_prob(int regime, int64_t step, int bin) const {
     const int b = std::clamp(bin, 0, kBins - 1);
     std::lock_guard<std::mutex> lock(mu_);
     return prob_mono_[r][k][b];
+}
+
+void OnlineMtpLut::observe_seen(int regime, int64_t step, int bin) {
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int k = static_cast<int>(std::clamp<int64_t>(step, 0, kMaxK - 1));
+    const int b = std::clamp(bin, 0, kBins - 1);
+    std::lock_guard<std::mutex> lock(mu_);
+    for (int i = 0; i < kBins; ++i) {
+        seen_bins_[r][k][i] *= kSeenGamma;
+    }
+    seen_bins_[r][k][b] += 1.0f;
+}
+
+float OnlineMtpLut::expected_option_value(int regime, int64_t step, float p_cum, float tau_global,
+                                          float delta_verify) const {
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int k = static_cast<int>(std::clamp<int64_t>(step, 0, kMaxK - 1));
+    std::lock_guard<std::mutex> lock(mu_);
+    float total = 0.0f;
+    float ev_sum = 0.0f;
+    for (int b = 0; b < kBins; ++b) {
+        const float w = seen_bins_[r][k][b];
+        total += w;
+        ev_sum += w * std::max(0.0f, p_cum * tau_global * prob_mono_[r][k][b] - delta_verify);
+    }
+    return (total > 1e-6f) ? (ev_sum / total) : std::max(0.0f, p_cum * tau_global - delta_verify);
 }
 
 void OnlineMtpLut::update(int regime, const DraftObs* obs, size_t count, int accepted, bool ended_or_cut) {
@@ -505,8 +533,8 @@ int OnlineDraftTempTuner::step_group_for(int64_t step) {
 }
 
 int OnlineDraftTempTuner::max_scales_for(int regime, int step_group) {
-    // Allow T_draft > T (scale 1.15) only on step 0 of high-temperature decoding (T > 0.8),
-    // keeping chain steps (>= 1) and mid/low temperatures <= 1.00 to avoid long-chain tail drift.
+    // Allow T_draft > T (scale 1.15) ONLY at step 0 of high-T decoding (T > 0.8), where a slightly
+    // hotter start broadens q over multi-way forks without exploding downstream variance.
     return (regime >= 3 && step_group == 0) ? kScales : (kScales - 1);
 }
 
