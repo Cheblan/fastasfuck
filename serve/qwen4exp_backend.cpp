@@ -231,9 +231,11 @@ std::string Qwen4ExpBackend::describe() const {
                    s += std::to_string(session_->mtp_vocab());
                }
                if (!draft_vocab_filter_.empty()) s += ", filter=" + draft_vocab_filter_;
+               if (model_.has_draft_head_2s()) s += ", 2s-pca";
                s += ")";
                return s;
            }() : std::string()) +
+           (model_.has_lm_head_2s() ? ", lm_head_2s" : "") +
            (model_.has_vision() ? ", vision tower on" : "") + [&] {
                const NgramTableRows *t = ngram_table();
                return t ? ", n-gram row cache " + std::to_string(t->cache_rows()) + " rows" : std::string();

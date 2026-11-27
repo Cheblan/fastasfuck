@@ -180,10 +180,35 @@ public:
     const std::vector<int32_t> &compact_to_vocab() const { return compact_to_vocab_; }
     // Device bytes the copy holds (0 when none, or when it is the loaded Q4 head itself).
     size_t draft_head_q4_bytes() const {
+        if (has_draft_head_2s()) return draft_head_2s_.bytes;
         return draft_q4_ ? draft_q4_bytes_ : (draft_q6_ ? draft_q6_bytes_ : (draft_q8_ ? draft_q8_bytes_ : 0));
     }
 
+    // Two-Stage Act-PCA + Q4 preview + exact Q8 gather head (kernels/draft2s):
+    //   compact draft_head_2s (M_cand=512, cap=1024) and optional lm_head_2s (M_cand=1024, cap=1536).
+    struct Head2S {
+        int64_t R = 0, V = 0;
+        int32_t M_cand = 0, cap = 0;
+        DeviceBuffer<uint16_t> E_bf16;
+        Q4Device P_q4;
+        DeviceBuffer<int32_t> row_map;
+        size_t bytes = 0;
+    };
+    void make_draft_head_2s(const std::vector<uint16_t> &e_bf16, int64_t R, const std::vector<int32_t> &selected_rows,
+                            int32_t M_cand = 512, int32_t cap = 1024, int threads = 16);
+    void make_lm_head_2s(const std::vector<uint16_t> &e_bf16, int64_t R, int32_t M_cand = 1024, int32_t cap = 1536,
+                         int threads = 16);
+    bool has_draft_head_2s() const { return draft_head_2s_.R > 0; }
+    const Head2S &draft_head_2s() const { return draft_head_2s_; }
+    size_t draft_head_2s_bytes() const { return draft_head_2s_.bytes; }
+    bool has_lm_head_2s() const { return lm_head_2s_.R > 0; }
+    const Head2S &lm_head_2s() const { return lm_head_2s_; }
+    size_t lm_head_2s_bytes() const { return lm_head_2s_.bytes; }
+
 private:
+    void build_head_2s(const char *fn, Head2S &out, const std::vector<uint16_t> &e_bf16, int64_t R,
+                       const std::vector<int32_t> &selected_rows, int32_t M_cand, int32_t cap, int threads,
+                       const char *tag);
     Qwen4ExpDims dims_;
     kernels::Act act_;
     std::unique_ptr<FafDevice> w_;
@@ -201,6 +226,8 @@ private:
     size_t draft_q4_bytes_ = 0;
     size_t draft_q6_bytes_ = 0;
     size_t draft_q8_bytes_ = 0;
+    Head2S draft_head_2s_;
+    Head2S lm_head_2s_;
     bool truncated_ = false, shared_separate_ = false, has_mtp_ = false;
     MtpHead mtp_;
     Hc final_;
@@ -931,6 +958,11 @@ public:
     void set_mtp_vocab(int64_t n);
     int64_t mtp_vocab() const { return mtp_vocab_; }
 
+    // Captures trunk final_mixed (+ MTP hc_mixer outputs if MTP is enabled) across prompt_ids for Act-PCA
+    // calibration, then resets the session cleanly.
+    std::vector<uint16_t> capture_calibration_hidden_states(const std::vector<int32_t> &prompt_ids,
+                                                            int mtp_probe_steps = 64);
+
 private:
     const Qwen4ExpModel &m_;
     KvReservationLayout kv_layout_;
@@ -1000,11 +1032,13 @@ private:
     // stream_; broken_ set until the caller's read-back succeeds, which then calls mtp_done(seq, step)).
     void run_mtp(int seq, int32_t token_id, int64_t step);
     void mtp_done(int seq, int64_t step);
-    // forward_mtp_top2_batch / forward_mtp_cands_batch's shared body: steps 1-11 - the batched head's layer and the
-    // LM head's logits into logits_ [T, pick_vocab]; returns pick_vocab.
+    // forward_mtp_top2_batch / forward_mtp_cands_batch's shared body: steps 1-11a (trunk + MTP hc_mixer -> u_)
+    // and full body including legacy dense LM head projection.
+    void mtp_batch_trunk(const std::vector<MtpDraftRun> &runs);
     int64_t mtp_batch_body(const std::vector<MtpDraftRun> &runs);
     // mtp_pick per row + one host copy: the batch's MtpTop2 (vocab-remapped, mtp_done called).
     std::vector<MtpTop2> mtp_batch_reduce(const std::vector<MtpDraftRun> &runs, int64_t pick_vocab);
+    void ensure_draft2s_ws(int64_t max_T, int64_t max_V, int64_t max_R, int32_t max_cap);
     DeviceBuffer<uint8_t> mtp_pick_;  // kernels::MtpPick on the device (allocated on the first forward_mtp_top2)
     DeviceBuffer<kernels::MtpPick> mtp_batch_picks_;
     PinnedHostBuffer host_batch_picks_;
@@ -1012,6 +1046,11 @@ private:
     DeviceBuffer<kernels::LogitCand> mtp_batch_cands_;   // [n_slots, kLogitCands] (forward_mtp_cands_batch)
     DeviceBuffer<uint32_t> mtp_batch_cands_nan_;
     PinnedHostBuffer host_batch_cands_;
+    DeviceBuffer<uint8_t> draft2s_ws_;
+    size_t draft2s_ws_bytes_ = 0;
+    DeviceBuffer<float> mtp_inv_t_dev_;
+    PinnedHostBuffer mtp_inv_t_host_;
+    std::vector<uint16_t> *mtp_calib_sink_ = nullptr;
     // Grouped experts for multi-token forwards (kernels/moe_grouped): the route grouping and combine's FP32
     // per-slot dots. Allocated when max_tokens reaches kGroupedMinTokens.
     // QSA selection past dense_key_limit(): scores [max_tokens, cap_blocks] F32, the kept blocks [max_tokens,

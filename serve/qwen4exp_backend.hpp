@@ -51,6 +51,9 @@ public:
     bool has_mtp() const override { return session_->has_mtp(); }
     float mtp_draft_step_ms() const override {
         if (!session_->has_mtp()) return 1.64f;
+        if (model_.has_draft_head_2s()) {
+            return 0.250f + 0.160f * (float(model_.draft_head_2s().V) / 248320.0f);
+        }
         const auto &draft = model_.draft_head_q4();
         if (draft.bits == 4 && draft.N() > 0) {
             return 0.550f + 1.090f * (float(draft.N()) / 248320.0f);

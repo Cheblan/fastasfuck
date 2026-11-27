@@ -8,6 +8,7 @@
 // Default paths are under $STRIX_MODELS_DIR (else ~/models/strix-infer).
 
 #include "common/check.hpp"
+#include "runtime/act_pca.hpp"
 #include "runtime/device_buffer.hpp"
 #include "runtime/qwen4exp.hpp"
 #include "serve/engine.hpp"
@@ -191,6 +192,8 @@ int run(int argc, char **argv) {
     const KvFormat kv_format = parse_kv_format(settings.text("kv-cache"));  // an unknown value fails startup
     const bool use_mtp = settings.on("mtp");
     const bool draft_head_q4 = settings.on("draft-head-q4");
+    const bool draft_head_2stage = settings.on("draft-head-2stage");
+    const bool lm_head_2stage = settings.on("lm-head-2stage");
     const int64_t mtp_draft = settings.integer("mtp-draft");
     const float mtp_margin = (float)settings.number("mtp-margin");
     const std::string mtp_gate_rule = settings.text("mtp-gate-rule");
@@ -263,24 +266,28 @@ int run(int argc, char **argv) {
              (double)model.rope_scale());
     slog(LogLevel::Info, "startup: %.1f GiB of weights loaded in %.1f s",
                  (double)model.weights().data_bytes() / (1ull << 30), model.weights().load_seconds());
-    // MTP drafts score a compact / Q4 copy of the draft vocabulary's LM head rows (Qwen4ExpModel::make_draft_head; upstream
-    // PR #2): saves memory bandwidth per draft call, the verify still decides every token.
+    // MTP drafts score a compact / Q4 copy of the draft vocabulary's LM head rows (or two-stage Act-PCA built
+    // below once Qwen4ExpSession is ready for calibration if cached file is absent).
     std::vector<int32_t> compact_ids;
     int64_t eu_ascii_boundary = 0;
+    const bool want_draft_2s = use_mtp && model.has_mtp() && draft_head_2stage && model.lm_head().bits == 8;
+    const bool want_lm_2s = lm_head_2stage && model.lm_head().bits == 8;
     if (use_mtp && model.has_mtp()) {
         const auto t0 = std::chrono::steady_clock::now();
         if (is_filtered) {
             const int64_t max_v = std::min((int64_t)tok.size(), model.dims().vocab);
             compact_ids = vocab_filter::filter_vocabulary(tok, filter_spec, max_v, &eu_ascii_boundary);
-            model.make_draft_head(compact_ids, /*quantize_q4=*/draft_head_q4, /*G=*/64, /*threads=*/16);
-            const double dur_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            slog(LogLevel::Info,
-                 "startup: MTP draft head: compact Q%d filter '%s' retained %lld / %lld tokens (%.1f%%), %.1f MB, "
-                 "eu_ascii_start=%lld, made in %.2f s",
-                 model.draft_head_q4().bits, filter_spec.canonical.c_str(), (long long)compact_ids.size(),
-                 (long long)model.dims().vocab, 100.0 * (double)compact_ids.size() / (double)model.dims().vocab,
-                 (double)model.draft_head_q4_bytes() / 1e6, (long long)eu_ascii_boundary, dur_s);
-        } else {
+            if (!want_draft_2s) {
+                model.make_draft_head(compact_ids, /*quantize_q4=*/draft_head_q4, /*G=*/64, /*threads=*/16);
+                const double dur_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                slog(LogLevel::Info,
+                     "startup: MTP draft head: compact Q%d filter '%s' retained %lld / %lld tokens (%.1f%%), %.1f MB, "
+                     "eu_ascii_start=%lld, made in %.2f s",
+                     model.draft_head_q4().bits, filter_spec.canonical.c_str(), (long long)compact_ids.size(),
+                     (long long)model.dims().vocab, 100.0 * (double)compact_ids.size() / (double)model.dims().vocab,
+                     (double)model.draft_head_q4_bytes() / 1e6, (long long)eu_ascii_boundary, dur_s);
+            }
+        } else if (!want_draft_2s) {
             if (draft_head_q4) {
                 const int64_t rows = model.dims().vocab;
                 model.make_draft_head(rows, /*quantize_q4=*/true, /*G=*/64, /*threads=*/16);
@@ -303,7 +310,6 @@ int run(int argc, char **argv) {
             }
         }
     }
-    const std::string calib_vocab_key = vocab_filter::cache_key(filter_spec, compact_ids);
     std::unique_ptr<vision::ServedVision> served_vision;
     if (vision) {
         STRIX_CHECK(model.has_vision(), "fastasfuck_server: vision = on but the model loaded without a tower");
@@ -445,6 +451,63 @@ int run(int argc, char **argv) {
                         "keep its RAM margin after it (MemAvailable ", c->mem_available_now() >> 20, " MiB) - every ",
                         "slot together holds more K/V than this machine has room for");
         });
+    if (want_draft_2s || want_lm_2s) {
+        constexpr int64_t kPcaRank = 512;
+        const auto t_2s0 = std::chrono::steady_clock::now();
+        const std::string cal_text = default_act_pca_calibration_text();
+        uint64_t cal_hash = 14695981039346656037ULL;
+        for (unsigned char c : cal_text) {
+            cal_hash ^= c;
+            cal_hash *= 1099511628211ULL;
+        }
+        char cal_tag[48];
+        std::snprintf(cal_tag, sizeof(cal_tag), "act_pca_r512_v2_%016llx", (unsigned long long)cal_hash);
+        uint64_t pca_h = 0, pca_fs = 0;
+        int64_t pca_mt = 0;
+        const std::string pca_fp = compute_weights_fingerprint(
+            weights, cfg.model_id, 8, cal_tag, settings.text("gdn-precision"), &pca_h, &pca_fs, &pca_mt,
+            static_cast<int>(Qwen4ExpSession::kGroupedMinTokens));
+        std::string pca_dir = weights;
+        const size_t pca_slash = pca_dir.rfind('/');
+        const std::string pca_cache_path =
+            (pca_slash != std::string::npos ? pca_dir.substr(0, pca_slash) : std::string(".")) +
+            "/draft2s_pca_r512.bin";
+        std::vector<uint16_t> e_bf16;
+        const bool pca_hit = load_act_pca_cache(pca_cache_path, pca_fp, kPcaRank, model.dims().d, e_bf16);
+        if (!pca_hit) {
+            const std::vector<int32_t> cal_ids = tok.encode(cal_text);
+            const std::vector<uint16_t> u_cal =
+                backend.session().capture_calibration_hidden_states(cal_ids, use_mtp && model.has_mtp() ? 64 : 0);
+            const int64_t n_cal = (int64_t)u_cal.size() / model.dims().d;
+            e_bf16 = compute_act_pca_basis_bf16(u_cal.data(), n_cal, model.dims().d, kPcaRank);
+            save_act_pca_cache(pca_cache_path, pca_fp, kPcaRank, model.dims().d, e_bf16);
+            slog(LogLevel::Info, "startup: Act-PCA basis R=%lld computed from %lld hidden states and cached to %s",
+                 (long long)kPcaRank, (long long)n_cal, pca_cache_path.c_str());
+        }
+        if (want_draft_2s) {
+            model.make_draft_head_2s(e_bf16, kPcaRank, compact_ids, /*M_cand=*/512, /*cap=*/1024, /*threads=*/16);
+            const double dur_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_2s0).count();
+            slog(LogLevel::Info,
+                 "startup: MTP draft head: two-stage Act-PCA (R=%lld, M=512, exact Q8 gather) filter '%s' "
+                 "retained %lld / %lld tokens (%.1f%%), %.1f MB, %s in %.2f s",
+                 (long long)kPcaRank, filter_spec.canonical.c_str(), (long long)model.draft_head_2s().V,
+                 (long long)model.dims().vocab, 100.0 * (double)model.draft_head_2s().V / (double)model.dims().vocab,
+                 (double)model.draft_head_2s_bytes() / 1e6, pca_hit ? "cache-hit" : "calibrated", dur_s);
+        }
+        if (want_lm_2s) {
+            const auto t_lm0 = std::chrono::steady_clock::now();
+            model.make_lm_head_2s(e_bf16, kPcaRank, /*M_cand=*/1536, /*cap=*/2048, /*threads=*/16);
+            const double lm_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_lm0).count();
+            slog(LogLevel::Info,
+                 "startup: verify LM head: two-stage Act-PCA (R=%lld, M=1536, exact Q8 gather) %.1f MB, built in %.2f s",
+                 (long long)kPcaRank, (double)model.lm_head_2s_bytes() / 1e6, lm_s);
+        }
+    }
+    const std::string calib_vocab_key =
+        vocab_filter::cache_key(filter_spec, compact_ids) +
+        (model.has_draft_head_2s() ? "+2s_r512_m512" : "") +
+        (model.has_lm_head_2s() ? "+lm2s_m1536" : "");
+
     MtpHardwareProfile hw_prof;
     hw_prof.draft_step_ms = (float)settings.number("mtp-draft-ms");
     hw_prof.verify_base_ms = (float)settings.number("mtp-verify-base-ms");
@@ -564,18 +627,20 @@ int run(int argc, char **argv) {
                 }
 
                 // 3a. Calibrate solo verify latencies for k in [1..8] (single slot 0, 1 sequence with k tokens)
+                const bool cal_cands = model.has_lm_head_2s();
+                const int64_t cal_valid = std::min<int64_t>((int64_t)tok.size(), model.dims().vocab);
                 const std::vector<int> kSoloNodes = {1, 2, 3, 4, 5, 6, 7, 8};
                 std::vector<float> solo_grid(9, 0.0f);
                 for (int k : kSoloNodes) {
                     std::vector<int32_t> test_ids(calib_all.begin(), calib_all.begin() + k);
                     std::vector<LmBackend::VerifyRun> runs = {{0, test_ids, nullptr}};
-                    backend.verify_batch(runs, false, 0);
+                    backend.verify_batch(runs, cal_cands, cal_valid);
                     backend.drop_verify(0);
 
                     std::vector<float> k_times;
                     for (int t = 0; t < 5; ++t) {
                         const auto t0 = std::chrono::steady_clock::now();
-                        backend.verify_batch(runs, false, 0);
+                        backend.verify_batch(runs, cal_cands, cal_valid);
                         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                         backend.drop_verify(0);
                         k_times.push_back((float)ms);
@@ -615,13 +680,13 @@ int run(int argc, char **argv) {
                     }
 
                     // 1 untimed warmup
-                    backend.verify_batch(runs, false, 0);
+                    backend.verify_batch(runs, cal_cands, cal_valid);
                     for (const auto &r : runs) backend.drop_verify(r.seq);
 
                     std::vector<float> k_times;
                     for (int t = 0; t < 5; ++t) {
                         const auto t0 = std::chrono::steady_clock::now();
-                        backend.verify_batch(runs, false, 0);
+                        backend.verify_batch(runs, cal_cands, cal_valid);
                         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                         for (const auto &r : runs) backend.drop_verify(r.seq);
                         k_times.push_back((float)ms);

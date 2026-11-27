@@ -182,12 +182,12 @@ add_library(strix_kernels STATIC)
 strix_hip_sources(strix_kernels kernels/norm.hip kernels/embedding.hip kernels/linear.hip kernels/linear_q4.hip kernels/linear_q5.hip kernels/linear_q6.hip kernels/linear_q8.hip
     kernels/swiglu.hip kernels/rope.hip kernels/attention_gqa.hip kernels/gdn.hip
     kernels/residual.hip kernels/moe_router.hip kernels/moe_grouped.hip kernels/wmma.hip kernels/linear_wmma.hip kernels/hc_wmma.hip kernels/hc.hip kernels/ple.hip kernels/qsa_indexer.hip
-    kernels/mtp_pick.hip kernels/logits_topk.hip kernels/logits_bias.hip kernels/vision.hip kernels/kv8.hip)
+    kernels/mtp_pick.hip kernels/logits_topk.hip kernels/logits_bias.hip kernels/draft2s.hip kernels/vision.hip kernels/kv8.hip)
 target_include_directories(strix_kernels PUBLIC "${CMAKE_SOURCE_DIR}")
 target_link_libraries(strix_kernels PUBLIC strix_rocm strix_formats)
 
 add_library(strix_model STATIC runtime/qwen3_5.cpp runtime/qwen4exp.cpp runtime/vision_tower.cpp
-    runtime/faf_loader.cpp runtime/ngram_rows.cpp runtime/ngram_table.cpp)
+    runtime/faf_loader.cpp runtime/ngram_rows.cpp runtime/ngram_table.cpp runtime/act_pca.cpp)
 target_link_libraries(strix_model PUBLIC strix_kernels strix_formats strix_runtime)
 # ROCTX ranges (common/trace.hpp) for profiler timelines - off in every shipping build.
 option(STRIX_ROCTX "Compile in ROCTX ranges (forward / layer / sublayer) for rocprofv3 --marker-trace" OFF)
@@ -292,6 +292,9 @@ add_executable(bench_threshold_gemv_vs_wmma tools/bench_threshold_gemv_vs_wmma.c
 add_executable(test_ngram_cache tools/test_ngram_cache.cpp)
 target_link_libraries(test_ngram_cache PRIVATE strix_model strix_formats strix_runtime)
 target_link_libraries(bench_threshold_gemv_vs_wmma PRIVATE strix_kernels strix_formats strix_runtime)
+
+add_executable(test_draft2s tools/test_draft2s.cpp)
+target_link_libraries(test_draft2s PRIVATE strix_model strix_kernels strix_formats strix_runtime)
 
 
 

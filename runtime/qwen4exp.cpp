@@ -13,6 +13,8 @@
 #include "kernels/hc.hpp"
 #include "kernels/hc_wmma.hpp"
 #include "kernels/linear.hpp"
+#include "kernels/linear_q8.hpp"
+#include "kernels/draft2s.hpp"
 #include "kernels/moe_grouped.hpp"
 #include "kernels/moe_router.hpp"
 #include "kernels/mtp_pick.hpp"
@@ -32,6 +34,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <thread>
 
 namespace strix {
 
@@ -489,6 +492,125 @@ int64_t make_served_mtp_draft_head(Qwen4ExpModel &model, int64_t mtp_vocab) {
     const int64_t rows = mtp_vocab == 0 ? vocab : mtp_vocab;
     model.make_draft_head_q4(rows, /*G=*/64, /*threads=*/16);
     return rows;
+}
+
+void Qwen4ExpModel::build_head_2s(const char *fn, Head2S &out, const std::vector<uint16_t> &e_bf16, int64_t R,
+                                  const std::vector<int32_t> &selected_rows, int32_t M_cand, int32_t cap, int threads,
+                                  const char *tag) {
+    STRIX_CHECK(lm_head_.bits == 8, fn, ": exact Q8 LM head required (got Q", lm_head_.bits, ")");
+    const Q8DeviceView &w_q8 = lm_head_.q8;
+    const int64_t N_full = w_q8.N, K = w_q8.K;
+    STRIX_CHECK(N_full == dims_.vocab, fn, ": LM head rows ", N_full, " != vocab ", dims_.vocab);
+    STRIX_CHECK(R >= 64 && R <= K && R % 64 == 0, fn, ": invalid rank R=", R, " (expected multiple of 64 <= ", K, ")");
+    STRIX_CHECK((int64_t)e_bf16.size() == R * K, fn, ": E size ", e_bf16.size(), " != R*K ", R * K);
+    STRIX_CHECK(M_cand >= 1 && cap >= M_cand && cap <= kernels::kDraft2SMaxCap, fn, ": invalid M_cand/cap ", M_cand,
+                "/", cap);
+    STRIX_CHECK(threads >= 1 && threads <= 64, fn, ": invalid threads ", threads);
+
+    const int64_t V = selected_rows.empty() ? N_full : (int64_t)selected_rows.size();
+    STRIX_CHECK(V >= 1 && V <= N_full, fn, ": V=", V, " out of range");
+    for (int32_t r : selected_rows) {
+        STRIX_CHECK(r >= 0 && r < N_full, fn, ": selected_row ", r, " out of range [0, ", N_full, ")");
+    }
+
+    DeviceBuffer<uint16_t> d_E = DeviceBuffer<uint16_t>::from_host(e_bf16, std::string(tag) + ".E");
+    const int64_t chunk_R = std::min<int64_t>(64, R);
+    DeviceBuffer<float> d_dot((size_t)(chunk_R * N_full), std::string(tag) + ".dot_tmp");
+    std::vector<float> dot_host((size_t)(chunk_R * N_full));
+    std::vector<float> P_host((size_t)(V * R));
+
+    hipStream_t build_stream = nullptr;
+    STRIX_HIP_CHECK(hipStreamCreateWithFlags(&build_stream, hipStreamNonBlocking), fn, ": stream");
+    try {
+        for (int64_t r0 = 0; r0 < R; r0 += chunk_R) {
+            const int64_t cr = std::min(chunk_R, R - r0);
+            kernels::linear_q8(d_E.get() + (size_t)r0 * K, w_q8, d_dot.get(), cr, Act::BF16, Act::F32, build_stream);
+            STRIX_HIP_CHECK(hipMemcpyAsync(dot_host.data(), d_dot.get(), (size_t)(cr * N_full) * sizeof(float),
+                                           hipMemcpyDeviceToHost, build_stream),
+                            fn, ": readback preview dots");
+            STRIX_HIP_CHECK(hipStreamSynchronize(build_stream), fn, ": sync preview dots");
+
+            std::vector<std::thread> workers;
+            const int n_t = std::min<int>(threads, (int)V);
+            for (int t = 0; t < n_t; ++t) {
+                workers.emplace_back([&, t]() {
+                    const int64_t v0 = (V * t) / n_t;
+                    const int64_t v1 = (V * (t + 1)) / n_t;
+                    for (int64_t v = v0; v < v1; ++v) {
+                        const int64_t src = selected_rows.empty() ? v : (int64_t)selected_rows[(size_t)v];
+                        float *dst = P_host.data() + v * R + r0;
+                        for (int64_t r = 0; r < cr; ++r) {
+                            dst[r] = dot_host[(size_t)(r * N_full + src)];
+                        }
+                    }
+                });
+            }
+            for (auto &w : workers) w.join();
+        }
+    } catch (...) {
+        (void)hipStreamDestroy(build_stream);
+        throw;
+    }
+    STRIX_HIP_CHECK(hipStreamDestroy(build_stream), fn, ": destroy stream");
+
+    constexpr int64_t kQ4G = 64;
+    Q4Weight P_q4;
+    P_q4.N = V;
+    P_q4.K = R;
+    P_q4.G = kQ4G;
+    P_q4.q.resize((size_t)(V * R / 2));
+    P_q4.scale.resize((size_t)(V * (R / kQ4G)));
+    P_q4.minv.resize(P_q4.scale.size());
+    {
+        const int n_t = std::min<int>(threads, (int)V);
+        const int64_t gpr = R / kQ4G;
+        std::vector<std::thread> workers;
+        for (int t = 0; t < n_t; ++t) {
+            workers.emplace_back([&, t]() {
+                const int64_t v0 = (V * t) / n_t;
+                const int64_t v1 = (V * (t + 1)) / n_t;
+                if (v1 <= v0) return;
+                Q4Weight part = quantize_q4(P_host.data() + v0 * R, v1 - v0, R, kQ4G);
+                std::memcpy(P_q4.q.data() + (size_t)(v0 * R / 2), part.q.data(), part.q.size());
+                std::memcpy(P_q4.scale.data() + (size_t)(v0 * gpr), part.scale.data(), part.scale.size() * 2);
+                std::memcpy(P_q4.minv.data() + (size_t)(v0 * gpr), part.minv.data(), part.minv.size() * 2);
+            });
+        }
+        for (auto &w : workers) w.join();
+    }
+
+    Q4Device dev_P = Q4Device::upload(P_q4, std::string(tag) + ".P_q4");
+    DeviceBuffer<int32_t> dev_map;
+    if (!selected_rows.empty()) {
+        dev_map = DeviceBuffer<int32_t>::from_host(selected_rows, std::string(tag) + ".row_map");
+    }
+
+    out.R = R;
+    out.V = V;
+    out.M_cand = M_cand;
+    out.cap = cap;
+    out.E_bf16 = std::move(d_E);
+    out.P_q4 = std::move(dev_P);
+    out.row_map = std::move(dev_map);
+    out.bytes = (size_t)(R * K) * sizeof(uint16_t) + P_q4.bytes() + selected_rows.size() * sizeof(int32_t);
+}
+
+void Qwen4ExpModel::make_draft_head_2s(const std::vector<uint16_t> &e_bf16, int64_t R,
+                                       const std::vector<int32_t> &selected_rows, int32_t M_cand, int32_t cap,
+                                       int threads) {
+    const char *fn = "Qwen4ExpModel::make_draft_head_2s";
+    STRIX_CHECK(has_mtp_, fn, ": the model has no MTP head");
+    STRIX_CHECK(!has_draft_head_2s(), fn, ": draft_head_2s was already built");
+    STRIX_CHECK(draft_head_.bits == 0, fn, ": dense draft_head was already built");
+    build_head_2s(fn, draft_head_2s_, e_bf16, R, selected_rows, M_cand, cap, threads, "lm_head.draft_2s");
+    compact_to_vocab_ = selected_rows;
+}
+
+void Qwen4ExpModel::make_lm_head_2s(const std::vector<uint16_t> &e_bf16, int64_t R, int32_t M_cand, int32_t cap,
+                                    int threads) {
+    const char *fn = "Qwen4ExpModel::make_lm_head_2s";
+    STRIX_CHECK(!has_lm_head_2s(), fn, ": lm_head_2s was already built");
+    build_head_2s(fn, lm_head_2s_, e_bf16, R, {}, M_cand, cap, threads, "lm_head.full_2s");
 }
 
 const Qwen4ExpModel::Layer &Qwen4ExpModel::layer(int64_t i) const {
@@ -3204,9 +3326,9 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
     // into lg_src_, so the LM head's weights are read once for the whole batch - the batch's point (the head is
     // ~640 MB). The returned rows are run 0's, then run 1's - the order candidates() comes back in.
     int64_t lrow = 0;
+    const uint8_t *logits_src = nullptr;
     if (runs.size() == 1) {
-        if (runs[0].nL > 0)
-            lin(at(u_, (T - runs[0].nL) * D.d), m_.lm_head(), logits_.get(), runs[0].nL, Act::F32);
+        if (runs[0].nL > 0) logits_src = at(u_, (T - runs[0].nL) * D.d);
         lrow = runs[0].nL;
     } else if (nL_total > 0) {
         for (const Run &r : runs) {
@@ -3217,32 +3339,47 @@ std::vector<float> Qwen4ExpSession::forward_batch(std::vector<BatchRun> &batch, 
                             "Qwen4ExpSession::forward: logits-row compaction");
             lrow += r.nL;
         }
-        lin(lg_src_.get(), m_.lm_head(), logits_.get(), nL_total, Act::F32);
+        logits_src = lg_src_.get();
     }
     const int64_t n_logits = lrow;  // the batch's returned logits rows
     const bool cands = cand_n_valid > 0 && n_logits > 0;
-    if (cands) {
+    const bool use_lm_2s = cands && m_.has_lm_head_2s() && act == Act::BF16 && mask_rows == 0 && bias_n == 0;
+    if (use_lm_2s) {
+        const auto &h = m_.lm_head_2s();
+        ensure_draft2s_ws(std::max<int64_t>(kMaxLogits, n_logits), h.V, h.R, h.cap);
         auto *cd = reinterpret_cast<kernels::LogitCand *>(cand_dev_.get());
-        if (mask_rows > 0) {
-            STRIX_HIP_CHECK(hipMemcpyAsync(mask_dev_.get(), mask_host_.get(), (size_t)(mask_rows * mask_words) * 4,
-                                           hipMemcpyHostToDevice, stream_),
-                            "Qwen4ExpSession::forward: structured-output masks upload");
-            STRIX_HIP_CHECK(hipEventRecord(mask_uploaded_, stream_), "Qwen4ExpSession::forward: mask upload event");
-            mask_upload_recorded_ = true;
+        auto *nan_ptr = reinterpret_cast<uint32_t *>(cd + n_logits * kernels::kLogitCands);
+        kernels::Draft2SParams params{h.E_bf16.get(), h.P_q4.view(), m_.lm_head().q8,
+                                      h.row_map.size() ? h.row_map.get() : nullptr, h.R, h.V, h.M_cand, h.cap};
+        kernels::draft2s_forward(logits_src, params, n_logits, std::min(cand_n_valid, h.V), nullptr, nullptr, nullptr,
+                                 nullptr, nullptr, cd, nan_ptr, nullptr, draft2s_ws_.get(), draft2s_ws_bytes_, stream_);
+    } else {
+        if (n_logits > 0) {
+            lin(logits_src, m_.lm_head(), logits_.get(), n_logits, Act::F32);
         }
-        if (bias_n > 0) {
-            STRIX_HIP_CHECK(hipMemcpyAsync(bias_dev_.get(), bias_host_.get(),
-                                           (size_t)bias_n * sizeof(kernels::LogitBiasEntry), hipMemcpyHostToDevice,
-                                           stream_),
-                            "Qwen4ExpSession::forward: logit bias upload");
-            STRIX_HIP_CHECK(hipEventRecord(bias_uploaded_, stream_), "Qwen4ExpSession::forward: logit bias upload event");
-            bias_upload_recorded_ = true;
-            kernels::logits_bias(logits_.get(), n_logits, D.vocab, bias_dev_.get(), bias_n, stream_);
+        if (cands) {
+            auto *cd = reinterpret_cast<kernels::LogitCand *>(cand_dev_.get());
+            if (mask_rows > 0) {
+                STRIX_HIP_CHECK(hipMemcpyAsync(mask_dev_.get(), mask_host_.get(), (size_t)(mask_rows * mask_words) * 4,
+                                               hipMemcpyHostToDevice, stream_),
+                                "Qwen4ExpSession::forward: structured-output masks upload");
+                STRIX_HIP_CHECK(hipEventRecord(mask_uploaded_, stream_), "Qwen4ExpSession::forward: mask upload event");
+                mask_upload_recorded_ = true;
+            }
+            if (bias_n > 0) {
+                STRIX_HIP_CHECK(hipMemcpyAsync(bias_dev_.get(), bias_host_.get(),
+                                               (size_t)bias_n * sizeof(kernels::LogitBiasEntry), hipMemcpyHostToDevice,
+                                               stream_),
+                                "Qwen4ExpSession::forward: logit bias upload");
+                STRIX_HIP_CHECK(hipEventRecord(bias_uploaded_, stream_), "Qwen4ExpSession::forward: logit bias upload event");
+                bias_upload_recorded_ = true;
+                kernels::logits_bias(logits_.get(), n_logits, D.vocab, bias_dev_.get(), bias_n, stream_);
+            }
+            kernels::logits_topk(logits_.get(), n_logits, D.vocab, cand_n_valid, cd,
+                                 reinterpret_cast<uint32_t *>(cd + n_logits * kernels::kLogitCands), cand_ws_.get(),
+                                 cand_ws_bytes_, stream_, mask_rows > 0 ? mask_dev_.get() : nullptr,
+                                 mask_rows > 0 ? mask_words : 0);
         }
-        kernels::logits_topk(logits_.get(), n_logits, D.vocab, cand_n_valid, cd,
-                             reinterpret_cast<uint32_t *>(cd + n_logits * kernels::kLogitCands), cand_ws_.get(),
-                             cand_ws_bytes_, stream_, mask_rows > 0 ? mask_dev_.get() : nullptr,
-                             mask_rows > 0 ? mask_words : 0);
     }
 
     // MTP: each run gets the head layer's K / V (and indexer keys) for its positions, each row from its
@@ -3735,9 +3872,76 @@ Qwen4ExpSession::MtpTop2 Qwen4ExpSession::forward_mtp_top2_seq(int seq, int32_t 
     return res[0];
 }
 
-int64_t Qwen4ExpSession::mtp_batch_body(const std::vector<MtpDraftRun> &runs) {
-    const char *fn = "Qwen4ExpSession::mtp_batch_body";
-    if (runs.empty()) return 0;
+void Qwen4ExpSession::ensure_draft2s_ws(int64_t max_T, int64_t max_V, int64_t max_R, int32_t max_cap) {
+    const size_t need = kernels::draft2s_workspace_bytes(max_T, max_V, max_R, max_cap);
+    if (need > draft2s_ws_bytes_) {
+        if (stream_) STRIX_HIP_CHECK(hipStreamSynchronize(stream_), "ensure_draft2s_ws sync");
+        draft2s_ws_ = DeviceBuffer<uint8_t>(need, "draft2s workspace");
+        draft2s_ws_bytes_ = need;
+    }
+    if (mtp_inv_t_dev_.size() < (size_t)std::max<int64_t>(max_T, n_slots())) {
+        const size_t n = (size_t)std::max<int64_t>({max_T, n_slots(), kMaxLogits});
+        mtp_inv_t_dev_ = DeviceBuffer<float>(n, "draft2s inv_T");
+        mtp_inv_t_host_ = PinnedHostBuffer(n * sizeof(float), "draft2s host inv_T");
+    }
+}
+
+std::vector<uint16_t> Qwen4ExpSession::capture_calibration_hidden_states(const std::vector<int32_t> &prompt_ids,
+                                                                        int mtp_probe_steps) {
+    STRIX_CHECK(m_.act() == Act::BF16, "capture_calibration_hidden_states: BF16 activations required");
+    STRIX_CHECK(!prompt_ids.empty(), "capture_calibration_hidden_states: empty prompt");
+    reset();
+    std::vector<uint16_t> captured;
+    const int64_t d = m_.dims().d;
+    Qwen4ExpProbe probe = [&](const std::string &name, const void *dev, int64_t rows, int64_t cols, ProbeType type) {
+        if (name != "final_mixed" || type != ProbeType::BF16 || cols != d) return;
+        const size_t off = captured.size();
+        captured.resize(off + (size_t)(rows * cols));
+        STRIX_HIP_CHECK(hipMemcpy(captured.data() + off, dev, (size_t)(rows * cols) * sizeof(uint16_t),
+                                  hipMemcpyDeviceToHost),
+                        "calibration final_mixed readback");
+    };
+    const int64_t chunk_sz = std::min<int64_t>(512, max_tokens_);
+    const size_t max_feed = (size_t)std::max<int64_t>(1, capacity_ - mtp_probe_steps - 16);
+    const size_t n_feed = std::min(prompt_ids.size(), max_feed);
+    std::vector<float> last_logits;
+    for (size_t off = 0; off < n_feed; off += (size_t)chunk_sz) {
+        const size_t cnt = std::min<size_t>((size_t)chunk_sz, n_feed - off);
+        std::vector<int32_t> chunk(prompt_ids.begin() + (ptrdiff_t)off, prompt_ids.begin() + (ptrdiff_t)(off + cnt));
+        last_logits = forward(chunk, 1, probe);
+    }
+    auto argmax_valid = [&](const std::vector<float> &lg) -> int32_t {
+        int32_t best = 0;
+        float best_v = -std::numeric_limits<float>::infinity();
+        const int64_t nv = std::min<int64_t>(248077, (int64_t)lg.size());
+        for (int64_t i = 0; i < nv; ++i) {
+            if (lg[(size_t)i] > best_v) {
+                best_v = lg[(size_t)i];
+                best = (int32_t)i;
+            }
+        }
+        return best;
+    };
+    if (mtp_ && mtp_probe_steps > 0 && !last_logits.empty()) {
+        struct SinkGuard {
+            std::vector<uint16_t> **slot;
+            ~SinkGuard() { *slot = nullptr; }
+        } guard{&mtp_calib_sink_};
+        mtp_calib_sink_ = &captured;
+        int32_t next_tok = argmax_valid(last_logits);
+        for (int s = 0; s < mtp_probe_steps; ++s) {
+            (void)forward_mtp_top2(next_tok, /*step=*/0, /*inv_T=*/1.0f);
+            last_logits = forward({next_tok}, 1);
+            next_tok = argmax_valid(last_logits);
+        }
+    }
+    reset();
+    return captured;
+}
+
+void Qwen4ExpSession::mtp_batch_trunk(const std::vector<MtpDraftRun> &runs) {
+    const char *fn = "Qwen4ExpSession::mtp_batch_trunk";
+    if (runs.empty()) return;
     STRIX_CHECK(mtp_, fn, ": the session was made without MTP");
     STRIX_CHECK(!broken_, fn, ": an earlier session call failed midway; reset() the session first");
     const int64_t T = (int64_t)runs.size();
@@ -3928,8 +4132,24 @@ int64_t Qwen4ExpSession::mtp_batch_body(const std::vector<MtpDraftRun> &runs) {
                         "saving MTP chain prev streams");
     }
 
-    // 11. Final HC mixer & batched LM head projection
+    // 11. Final HC mixer & optional calibration sink, followed by dense LM head projection when mtp_batch_body runs
     hc_mix(mtp.hc_mixer, false, mtp_x_.get(), u_.get());
+    if (mtp_calib_sink_ != nullptr) {
+        STRIX_HIP_CHECK(hipStreamSynchronize(stream_), "mtp_calib_sink sync");
+        const size_t off = mtp_calib_sink_->size();
+        const size_t add = (size_t)(T * D.d);
+        mtp_calib_sink_->resize(off + add);
+        STRIX_HIP_CHECK(hipMemcpy(mtp_calib_sink_->data() + off, u_.get(), add * sizeof(uint16_t), hipMemcpyDeviceToHost),
+                        "mtp_calib_sink copy");
+    }
+}
+
+int64_t Qwen4ExpSession::mtp_batch_body(const std::vector<MtpDraftRun> &runs) {
+    const char *fn = "Qwen4ExpSession::mtp_batch_body";
+    if (runs.empty()) return 0;
+    mtp_batch_trunk(runs);
+    const Act act = m_.act();
+    const int64_t T = (int64_t)runs.size();
     const QWeightView &draft = m_.draft_head_q4();
     const bool is_compact = !m_.compact_to_vocab().empty();
     QWeightView head = (draft.bits != 0 && (is_compact || mtp_vocab_ <= draft.N())) ? draft : m_.lm_head();
@@ -3990,7 +4210,47 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::mtp_batch_reduce(const st
 }
 
 std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(const std::vector<MtpDraftRun> &runs) {
+    const char *fn = "Qwen4ExpSession::forward_mtp_top2_batch";
     if (runs.empty()) return {};
+    if (m_.has_draft_head_2s() && m_.act() == Act::BF16) {
+        const auto &h = m_.draft_head_2s();
+        const int64_t T = (int64_t)runs.size();
+        const int64_t max_row = std::max<int64_t>(T, n_slots());
+        const int64_t ws_v = m_.has_lm_head_2s() ? std::max(h.V, m_.lm_head_2s().V) : h.V;
+        const int64_t ws_r = m_.has_lm_head_2s() ? std::max(h.R, m_.lm_head_2s().R) : h.R;
+        const int32_t ws_c = m_.has_lm_head_2s() ? std::max(h.cap, m_.lm_head_2s().cap) : h.cap;
+        ensure_draft2s_ws(std::max<int64_t>(kMaxLogits, max_row), ws_v, ws_r, ws_c);
+        mtp_batch_trunk(runs);
+        auto *h_inv = reinterpret_cast<float *>(mtp_inv_t_host_.get());
+        for (size_t r = 0; r < (size_t)T; ++r) h_inv[r] = runs[r].inv_T;
+        STRIX_HIP_CHECK(hipMemcpyAsync(mtp_inv_t_dev_.get(), h_inv, (size_t)T * sizeof(float), hipMemcpyHostToDevice,
+                                       stream_),
+                        "uploading draft2s inv_T");
+        kernels::Draft2SParams params{h.E_bf16.get(), h.P_q4.view(), m_.lm_head().q8,
+                                      h.row_map.size() ? h.row_map.get() : nullptr, h.R, h.V, h.M_cand, h.cap};
+        const int64_t n_valid = (params.row_map != nullptr) ? h.V : std::min(h.V, mtp_vocab_);
+        kernels::draft2s_forward(u_.get(), params, T, n_valid, mtp_inv_t_dev_.get(), router_err_.get(),
+                                 expert_err_.get(), attn_err_.get(), emb_err_.get(), nullptr, nullptr,
+                                 mtp_batch_picks_.get(), draft2s_ws_.get(), draft2s_ws_bytes_, stream_);
+        auto *host_picks = reinterpret_cast<kernels::MtpPick *>(host_batch_picks_.get());
+        STRIX_HIP_CHECK(hipMemcpyAsync(host_picks, mtp_batch_picks_.get(), (size_t)T * sizeof(kernels::MtpPick),
+                                       hipMemcpyDeviceToHost, stream_),
+                        "reading draft2s MTP picks");
+        STRIX_HIP_CHECK(hipStreamSynchronize(stream_), "syncing draft2s MTP draft");
+        std::vector<MtpTop2> results((size_t)T);
+        for (size_t r = 0; r < (size_t)T; ++r) {
+            const kernels::MtpPick &p = host_picks[r];
+            kernels::report_router_error(p.err, "Qwen4ExpSession MTP router");
+            kernels::report_expert_error(p.err + 3, "Qwen4ExpSession MTP experts");
+            kernels::report_attention_error(p.err + 6, "Qwen4ExpSession MTP QSA attention");
+            kernels::report_embedding_error(p.emb, m_.dims().vocab);
+            STRIX_CHECK(p.nan || (p.best >= 0 && p.best < m_.dims().vocab), fn, ": pick ", p.best,
+                        " outside [0, ", m_.dims().vocab, ")");
+            mtp_done(runs[r].seq, runs[r].step);
+            results[r] = {p.best, p.best_v, p.second_v, p.nan != 0, p.p_top1};
+        }
+        return results;
+    }
     const int64_t pick_vocab = mtp_batch_body(runs);
     return mtp_batch_reduce(runs, pick_vocab);
 }
@@ -4001,6 +4261,92 @@ std::vector<Qwen4ExpSession::MtpTop2> Qwen4ExpSession::forward_mtp_top2_batch(co
 std::vector<Qwen4ExpSession::MtpCands> Qwen4ExpSession::forward_mtp_cands_batch(const std::vector<MtpDraftRun> &runs) {
     const char *fn = "Qwen4ExpSession::forward_mtp_cands_batch";
     if (runs.empty()) return {};
+    if (m_.has_draft_head_2s() && m_.act() == Act::BF16) {
+        const auto &h = m_.draft_head_2s();
+        const int64_t T = (int64_t)runs.size();
+        const int64_t max_row = std::max<int64_t>(T, n_slots());
+        const int64_t ws_v = m_.has_lm_head_2s() ? std::max(h.V, m_.lm_head_2s().V) : h.V;
+        const int64_t ws_r = m_.has_lm_head_2s() ? std::max(h.R, m_.lm_head_2s().R) : h.R;
+        const int32_t ws_c = m_.has_lm_head_2s() ? std::max(h.cap, m_.lm_head_2s().cap) : h.cap;
+        ensure_draft2s_ws(std::max<int64_t>(kMaxLogits, max_row), ws_v, ws_r, ws_c);
+        mtp_batch_trunk(runs);
+        auto *h_inv = reinterpret_cast<float *>(mtp_inv_t_host_.get());
+        for (size_t r = 0; r < (size_t)T; ++r) h_inv[r] = runs[r].inv_T;
+        STRIX_HIP_CHECK(hipMemcpyAsync(mtp_inv_t_dev_.get(), h_inv, (size_t)T * sizeof(float), hipMemcpyHostToDevice,
+                                       stream_),
+                        "uploading draft2s cands inv_T");
+        kernels::Draft2SParams params{h.E_bf16.get(), h.P_q4.view(), m_.lm_head().q8,
+                                      h.row_map.size() ? h.row_map.get() : nullptr, h.R, h.V, h.M_cand, h.cap};
+        const bool is_compact = (params.row_map != nullptr);
+        auto eff_valid_for = [&](const MtpDraftRun &run) {
+            if (is_compact || run.n_valid <= 0) return h.V;
+            return std::min(h.V, run.n_valid);
+        };
+        const int64_t first_valid = eff_valid_for(runs[0]);
+        bool uniform_valid = true;
+        for (size_t r = 1; r < (size_t)T; ++r) {
+            if (eff_valid_for(runs[r]) != first_valid) {
+                uniform_valid = false;
+                break;
+            }
+        }
+        if (uniform_valid) {
+            kernels::draft2s_forward(u_.get(), params, T, first_valid, mtp_inv_t_dev_.get(), router_err_.get(),
+                                     expert_err_.get(), attn_err_.get(), emb_err_.get(), mtp_batch_cands_.get(),
+                                     mtp_batch_cands_nan_.get(), mtp_batch_picks_.get(), draft2s_ws_.get(),
+                                     draft2s_ws_bytes_, stream_);
+        } else {
+            const int64_t d = m_.dims().d;
+            for (size_t r = 0; r < (size_t)T; ++r) {
+                kernels::draft2s_forward(u_.get() + r * (size_t)d * sizeof(uint16_t), params, 1, eff_valid_for(runs[r]),
+                                         mtp_inv_t_dev_.get() + r, router_err_.get(), expert_err_.get(), attn_err_.get(),
+                                         emb_err_.get(), mtp_batch_cands_.get() + r * kernels::kLogitCands,
+                                         mtp_batch_cands_nan_.get() + r, mtp_batch_picks_.get() + r,
+                                         draft2s_ws_.get(), draft2s_ws_bytes_, stream_);
+            }
+        }
+        auto *host_cands = reinterpret_cast<kernels::LogitCand *>(host_batch_cands_.get());
+        auto *host_picks = reinterpret_cast<kernels::MtpPick *>(host_batch_picks_.get());
+        STRIX_HIP_CHECK(hipMemcpyAsync(host_cands, mtp_batch_cands_.get(),
+                                       (size_t)T * kernels::kLogitCands * sizeof(kernels::LogitCand),
+                                       hipMemcpyDeviceToHost, stream_),
+                        "reading draft2s MTP candidates");
+        STRIX_HIP_CHECK(hipMemcpyAsync(host_picks, mtp_batch_picks_.get(), (size_t)T * sizeof(kernels::MtpPick),
+                                       hipMemcpyDeviceToHost, stream_),
+                        "reading draft2s MTP picks");
+        STRIX_HIP_CHECK(hipStreamSynchronize(stream_), "syncing draft2s MTP cands");
+
+        std::vector<MtpCands> out((size_t)T);
+        for (size_t r = 0; r < (size_t)T; ++r) {
+            const kernels::MtpPick &p = host_picks[r];
+            kernels::report_router_error(p.err, "Qwen4ExpSession MTP router");
+            kernels::report_expert_error(p.err + 3, "Qwen4ExpSession MTP experts");
+            kernels::report_attention_error(p.err + 6, "Qwen4ExpSession MTP QSA attention");
+            kernels::report_embedding_error(p.emb, m_.dims().vocab);
+            STRIX_CHECK(p.nan || (p.best >= 0 && p.best < m_.dims().vocab), fn, ": pick ", p.best,
+                        " outside [0, ", m_.dims().vocab, ")");
+            mtp_done(runs[r].seq, runs[r].step);
+
+            MtpCands &c = out[r];
+            c.best = p.best, c.best_v = p.best_v, c.second_v = p.second_v, c.nan = (p.nan != 0), c.p_top1 = p.p_top1;
+            if (c.nan) {
+                for (int64_t i = 0; i < kernels::kLogitCands; ++i) {
+                    c.id[i] = INT32_MAX;
+                    c.v[i] = -std::numeric_limits<float>::infinity();
+                }
+                continue;
+            }
+            for (int64_t i = 0; i < kernels::kLogitCands; ++i) {
+                const kernels::LogitCand &k = host_cands[r * kernels::kLogitCands + (size_t)i];
+                STRIX_CHECK(k.id == INT32_MAX || (k.id >= 0 && k.id < m_.dims().vocab), fn, ": cand id ", k.id,
+                            " out of range");
+                c.id[i] = k.id;
+                c.v[i] = k.v;
+            }
+        }
+        return out;
+    }
+
     const int64_t pick_vocab = mtp_batch_body(runs);
     const int64_t T = (int64_t)runs.size();
     const bool compact = !m_.compact_to_vocab().empty();
