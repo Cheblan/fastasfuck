@@ -390,7 +390,18 @@ int32_t Sampler::sample_draft_cands(const float *v, const int32_t *id, int64_t m
     return q->id[last_pos];
 }
 
-int32_t Sampler::verify_leviathan(const LogitRows &l, int64_t r, int32_t d, const TruncDist &q) {
+namespace {
+
+double trunc_prob_of(const Sampler::TruncDist &dist, int32_t tok) {
+    for (size_t i = 0; i < dist.id.size(); ++i) {
+        if (dist.id[i] == tok) return dist.p[i];
+    }
+    return 0.0;
+}
+
+}  // namespace
+
+int32_t Sampler::verify_leviathan(const LogitRows &l, int64_t r, int32_t d, const TruncDist &q, TruncDist *out_p) {
     STRIX_CHECK(p_.temperature > 0, "Sampler::verify_leviathan: temperature ", p_.temperature, ", expected > 0");
     STRIX_CHECK(takes_candidates(), "Sampler::verify_leviathan: top_k ", p_.top_k, " needs 1..", kCandidates);
     STRIX_CHECK(l.cands != 0, "Sampler::verify_leviathan: candidate rows only (the full row has no truncated p here)");
@@ -402,12 +413,8 @@ int32_t Sampler::verify_leviathan(const LogitRows &l, int64_t r, int32_t d, cons
     STRIX_CHECK(!l.nan[(size_t)r], "Sampler::verify_leviathan: NaN logit(s) in row ", r);
     const TruncDist p =
         trunc_dist_from_cands(l.cand_v.data() + r * l.cands, l.cand_id.data() + r * l.cands, l.cands, p_.temperature);
-    auto prob_of = [](const TruncDist &dist, int32_t tok) {
-        for (size_t i = 0; i < dist.id.size(); ++i)
-            if (dist.id[i] == tok) return dist.p[i];
-        return 0.0;
-    };
-    const double pd = prob_of(p, d), qd = prob_of(q, d);
+    if (out_p) *out_p = p;
+    const double pd = trunc_prob_of(p, d), qd = trunc_prob_of(q, d);
     STRIX_CHECK(qd > 0, "Sampler::verify_leviathan: draft token ", d, " has q = 0 (outside the proposal's support)");
     if (pd >= qd || std::uniform_real_distribution<double>(0, 1)(rng_) < pd / qd) return d;
     // Rejected: draw from norm(max(0, p - q)). q's ids outside p's support carry no residual mass (p = 0 there), so
@@ -416,7 +423,7 @@ int32_t Sampler::verify_leviathan(const LogitRows &l, int64_t r, int32_t d, cons
     double sum = 0;
     size_t last_res_pos = 0;
     for (size_t i = 0; i < p.id.size(); ++i) {
-        res[i] = std::max(0.0, p.p[i] - prob_of(q, p.id[i]));
+        res[i] = std::max(0.0, p.p[i] - trunc_prob_of(q, p.id[i]));
         if (res[i] > 0.0) last_res_pos = i;
         sum += res[i];
     }
@@ -438,6 +445,32 @@ int32_t Sampler::verify_leviathan(const LogitRows &l, int64_t r, int32_t d, cons
         if (u < acc) return p.id[i];
     }
     return p.id[last_res_pos];
+}
+
+float Sampler::draft_entropy_confidence(const float *v, const int32_t *id, int64_t m, bool nan) const {
+    if (nan) return 0.0f;
+    STRIX_CHECK(v != nullptr && id != nullptr, "Sampler::draft_entropy_confidence: null argument");
+    STRIX_CHECK(takes_candidates() && p_.temperature > 0.0,
+                "Sampler::draft_entropy_confidence: requires top_k 1..20 and temperature > 0");
+    if (p_.top_k <= 1 || n_valid_ <= 1) return 1.0f;
+    const TruncDist q = trunc_dist_from_cands(v, id, m, p_.temperature);
+    double H = 0.0;
+    for (double pr : q.p) {
+        if (pr > 0.0) H -= pr * std::log(pr);
+    }
+    return static_cast<float>(std::clamp(std::exp(-H), 0.0, 1.0));
+}
+
+double Sampler::overlap_with_draft_at_temp(const TruncDist &p, const float *draft_v, const int32_t *draft_id,
+                                           int64_t draft_m, double draft_temp) const {
+    if (draft_temp <= 0.0 || p.id.empty() || !draft_v || !draft_id) return 0.0;
+    const TruncDist q = trunc_dist_from_cands(draft_v, draft_id, draft_m, draft_temp);
+    double ov = 0.0;
+    for (size_t i = 0; i < p.id.size(); ++i) {
+        const double qi = trunc_prob_of(q, p.id[i]);
+        if (qi > 0.0) ov += std::min(p.p[i], qi);
+    }
+    return ov;
 }
 
 // A large top-k (above kSmallK, where the one-pass list's inserts would go quadratic): fill every candidate and

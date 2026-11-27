@@ -116,10 +116,19 @@ public:
     // Leviathan's verify step for one draft token d proposed with distribution q (from sample_draft_cands): accept d
     // with probability min(1, p(d)/q(d)), p = row r's distribution at the request's temperature - the row as the
     // sampler takes it, after any guard/mask, exactly what sample() would draw from; on rejection draw from
-    // norm(max(0, p - q)). By the speculative-sampling identity the output distribution equals sample()'s for any q,
-    // so the request's sampler contract holds whatever the draft head does. Requires takes_candidates(), candidate
-    // rows and temperature > 0; d must have q(d) > 0.
-    int32_t verify_leviathan(const LogitRows &l, int64_t r, int32_t d, const TruncDist &q);
+    // norm(max(0, p - q)). If out_p is non-null, writes p for counterfactual draft diagnostics.
+    int32_t verify_leviathan(const LogitRows &l, int64_t r, int32_t d, const TruncDist &q,
+                             TruncDist *out_p = nullptr);
+
+    // Effective-support confidence exp(-H(q)) = 1 / N_eff in [0, 1] evaluated at the request's temperature
+    // (decoupled from any dynamic draft temperature scaling). Aligns with p_top1 on clean forks (0.50 on 50/50)
+    // while pushing smeared tails to low bins. Returns 1.0 when top_k <= 1 and 0.0 if the row contains NaN.
+    float draft_entropy_confidence(const float *v, const int32_t *id, int64_t m, bool nan) const;
+
+    // Counterfactual TVD overlap sum_x min(p(x), q_temp(x)) between target distribution p and the truncated draft
+    // distribution re-normalized at `draft_temp`.
+    double overlap_with_draft_at_temp(const TruncDist &p, const float *draft_v, const int32_t *draft_id,
+                                      int64_t draft_m, double draft_temp) const;
 
 private:
     SamplingParams p_;

@@ -611,6 +611,8 @@ struct EngineStats {
     double mtp_tau_global_ms = 0;
     double mtp_solo_verify_scale = 1.0;
     uint64_t mtp_lut_updates_total = 0;
+    uint64_t mtp_tuner_updates_total = 0;
+    float mtp_tuner_scale[2][3] = {};  // regimes: 0=mid (T=0.6), 1=high (T=1.0); step_groups: 0, 1, 2+
     // Seconds since the last request finished (or the engine started); 0 while one runs or waits. `busy` alone reads
     // 1 through a steady agent session, so a batch client sampling it saw a "stuck" flag; this lets it
     // wait for a real gap (e.g. idle_seconds >= 2).
@@ -911,6 +913,7 @@ private:
     mutable std::mutex mtp_mu_;
     OnlineMtpLut mtp_lut_;
     OnlineMtpLut mtp_lut_leviathan_{OnlineMtpLut::PriorMode::Leviathan};
+    OnlineDraftTempTuner draft_temp_tuner_;
     std::condition_variable cv_;
     std::deque<Job> queue_;
     bool stop_ = false;

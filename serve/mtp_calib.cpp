@@ -65,7 +65,8 @@ std::string compute_weights_fingerprint(
     const std::string& gdn_precision,
     uint64_t* out_strix_hash,
     uint64_t* out_file_size,
-    int64_t* out_mtime
+    int64_t* out_mtime,
+    int grouped_min_tokens
 ) {
     struct stat st;
     uint64_t file_size = 0;
@@ -94,12 +95,13 @@ std::string compute_weights_fingerprint(
     std::ostringstream ss;
     ss << model_id << "|"
        << weights_path << "|"
-       << "0x" << std::hex << header_index_hash << "|"
+       << "0x" << std::hex << header_index_hash << "|" << std::dec
        << file_size << "|"
        << mtime_ns << "|"
        << "q" << draft_head_bits << "|"
        << mtp_vocab_filter << "|"
-       << gdn_precision;
+       << gdn_precision << "|"
+       << "grp" << grouped_min_tokens;
 
     std::string desc = ss.str();
     uint64_t h1 = strix_hash64(desc.data(), desc.size());
@@ -270,6 +272,10 @@ std::optional<MtpCalibratedProfile> load_cached_profile(
                     res.draft_head_bits = res.draft_head_q4 ? 4 : 8;
                 }
             }
+            const json::Value *v_grp = meta->find("grouped_min_tokens");
+            if (v_grp) {
+                res.grouped_min_tokens = static_cast<int>(v_grp->as_int("grouped_min_tokens"));
+            }
         }
 
         return res;
@@ -309,6 +315,7 @@ bool save_cached_profile(
     meta.set("draft_head_q4", json::Value::boolean(profile.draft_head_q4));
     meta.set("mtp_vocab_filter", json::Value::string(profile.mtp_vocab_filter));
     meta.set("gdn_precision", json::Value::string(profile.gdn_precision));
+    meta.set("grouped_min_tokens", json::Value::integer(profile.grouped_min_tokens));
     p.set("metadata", meta);
 
     json::Value hw = json::Value::object();
@@ -338,7 +345,7 @@ bool save_cached_profile(
 
     profiles.set(profile.fingerprint, p);
     root.set("profiles", profiles);
-    root.set("version", json::Value::integer(1));
+    root.set("version", json::Value::integer(2));
 
     std::ofstream out(cache_file);
     if (!out.is_open()) return false;
@@ -477,6 +484,111 @@ OnlineMtpLut::Cell OnlineMtpLut::cell(int regime, int step, int bin) const {
     const int b = std::clamp(bin, 0, kBins - 1);
     std::lock_guard<std::mutex> lock(mu_);
     return cells_[r][k][b];
+}
+
+OnlineDraftTempTuner::OnlineDraftTempTuner() {
+    reset();
+}
+
+void OnlineDraftTempTuner::reset() {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto &row : buckets_) {
+        for (auto &b : row) b = Bucket{};
+    }
+    updates_total_ = 0;
+}
+
+int OnlineDraftTempTuner::step_group_for(int64_t step) {
+    if (step <= 0) return 0;
+    if (step == 1) return 1;
+    return 2;
+}
+
+int OnlineDraftTempTuner::max_scales_for(int regime, int step_group) {
+    // Allow T_draft > T (scale 1.15) only on step 0 of high-temperature decoding (T > 0.8),
+    // keeping chain steps (>= 1) and mid/low temperatures <= 1.00 to avoid long-chain tail drift.
+    return (regime >= 3 && step_group == 0) ? kScales : (kScales - 1);
+}
+
+float OnlineDraftTempTuner::default_scale_for_temp(double temp) {
+    return static_cast<float>(std::clamp(1.15 - 0.45 * temp, 0.55, 1.0));
+}
+
+float OnlineDraftTempTuner::scale_for(double temp, int64_t step) const {
+    const int r = OnlineMtpLut::regime_for_temp(temp);
+    const int sg = step_group_for(step);
+    const int n_scales = max_scales_for(r, sg);
+    std::lock_guard<std::mutex> lock(mu_);
+    const Bucket &b = buckets_[r][sg];
+    if (b.obs < kWarmupObs || b.active_idx < 0 || b.active_idx >= n_scales) {
+        return default_scale_for_temp(temp);
+    }
+    return kScaleGrid[b.active_idx];
+}
+
+void OnlineDraftTempTuner::update(int regime, int64_t step, const float overlaps[kScales]) {
+    if (!overlaps) return;
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int sg = step_group_for(step);
+    const int n_scales = max_scales_for(r, sg);
+    std::lock_guard<std::mutex> lock(mu_);
+    Bucket &b = buckets_[r][sg];
+    if (b.obs < kWarmupObs) {
+        const float n1 = static_cast<float>(b.obs + 1);
+        for (int s = 0; s < kScales; ++s) {
+            b.ema[s] += (overlaps[s] - b.ema[s]) / n1;
+        }
+        ++b.obs;
+        if (b.obs == kWarmupObs) {
+            int best = 0;
+            for (int s = 1; s < n_scales; ++s) {
+                if (b.ema[s] > b.ema[best]) best = s;
+            }
+            b.active_idx = best;
+        }
+    } else {
+        for (int s = 0; s < kScales; ++s) {
+            b.ema[s] = (1.0f - kEmaAlpha) * b.ema[s] + kEmaAlpha * overlaps[s];
+        }
+        ++b.obs;
+        int best = 0;
+        for (int s = 1; s < n_scales; ++s) {
+            if (b.ema[s] > b.ema[best]) best = s;
+        }
+        if (b.active_idx < 0 || b.active_idx >= n_scales) {
+            b.active_idx = best;
+        } else if (best != b.active_idx && b.ema[best] > b.ema[b.active_idx] + kHysteresis) {
+            b.active_idx = best;
+        }
+    }
+    ++updates_total_;
+}
+
+uint64_t OnlineDraftTempTuner::updates_total() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return updates_total_;
+}
+
+int OnlineDraftTempTuner::active_scale_idx(int regime, int step_group) const {
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int sg = std::clamp(step_group, 0, kStepGroups - 1);
+    std::lock_guard<std::mutex> lock(mu_);
+    return buckets_[r][sg].active_idx;
+}
+
+int OnlineDraftTempTuner::obs_count(int regime, int step_group) const {
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int sg = std::clamp(step_group, 0, kStepGroups - 1);
+    std::lock_guard<std::mutex> lock(mu_);
+    return buckets_[r][sg].obs;
+}
+
+float OnlineDraftTempTuner::ema_overlap(int regime, int step_group, int scale_idx) const {
+    const int r = std::clamp(regime, 0, kRegimes - 1);
+    const int sg = std::clamp(step_group, 0, kStepGroups - 1);
+    const int s = std::clamp(scale_idx, 0, kScales - 1);
+    std::lock_guard<std::mutex> lock(mu_);
+    return buckets_[r][sg].ema[s];
 }
 
 } // namespace strix
