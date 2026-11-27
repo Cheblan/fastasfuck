@@ -106,9 +106,8 @@ The engine **never silently ignores unknown or invalid configuration options**. 
 | `mtp-margin-slope` | `Number` | `0.0` to `1.0` | `0.08` | Margin increase per draft step: margin_k = margin_0 + k * slope. |
 | `mtp-gate-rule` | `Text` | `margin`, `cost` | `margin` | Gating rule for greedy decoding (T = 0): `margin` (deterministic exactness) or `cost`. |
 | `sampled-gate` | `Text` | `cost`, `margin` | `cost` | Gating rule for stochastic sampling (T > 0): `cost` (evaluates expected time speedup using empirical verify latency tables) or `margin`. |
-| `mtp-vocab` | `Int` | `0` to `1073741824` | `0` | Restricts draft head scoring to token range [0, N). `0` scores over the full vocabulary. |
-| `mtp-vocab-filter` | `Text` | `all`, `en+ru`, `en`, `no-cjk`, or section list | `all` | Prunes draft head matrix rows by Unicode script. Presets: `all` (or `full`), `en+ru` (or `ru+en`), `en` (or `coding`), `no-cjk` (or `western`), or comma-separated sections (`core,latin,cyrillic,greek,digits,punct,code,cjk,arabic,asian,other`) where `core` is mandatory. |
-| `draft-head-q4` | `OnOff` | `on`, `off` | `on` | Quantizes draft head LM rows to Q4 at startup. Reduces draft step latency from 2.11 ms to 1.57 ms while keeping the base verifier in full precision. |
+| `mtp-vocab-filter` | `Text` | `all`, `en`, or `en+<blocks>` | `all` | Lossless draft-head vocabulary filter. Default `all` retains all 248,320 rows (slower drafting, emits startup warning). Filter mode requires mandatory `en` (core + English/code) with blocks combined via `+`: `eu`, `ru` (`cyrillic`), `zh` (`cn`), `ja` (`jp`), `ko` (`kr`), `ar` (`fa`), `other`. See Section 4. |
+| `draft-head-q4` | `OnOff` | `on`, `off` | `on` | Quantizes draft head LM rows to Q4 at startup. Reduces draft step latency from 2.11 ms (`all` Q8) down to 1.28 ms (`en+ru` Q4) while keeping the base verifier in full precision. |
 | `mtp-calib` | `OnOff` | `on`, `off` | `on` | Executes automated hardware latency calibration on physical GPU silicon at server startup. |
 | `mtp-calib-cache` | `OnOff` | `on`, `off` | `on` | Persists calibrated profile to `mtp_calib_cache.json` alongside model weights for instant subsequent launches. |
 | `mtp-calib-cache-file` | `PathOrOff` | Valid file path, `off` | `off` | Explicit path to calibration JSON file (`off` = automatic based on model directory). |
@@ -213,7 +212,6 @@ mtp-gate-rule = margin
 sampled-gate = cost
 mtp-lut-step-penalty = 0.015
 mtp-ema-decay = 0.15
-mtp-vocab = 0
 mtp-vocab-filter = all
 draft-head-q4 = on
 
@@ -252,19 +250,49 @@ vision-preprocess-limit = 2
 
 ---
 
-## 4. Vocabulary Filtering: Universal `all` vs Localized `en+ru`
+## 4. Draft Vocabulary Filtering (`--mtp-vocab-filter`)
 
-The default configuration defines:
+`--mtp-vocab-filter` prunes unused language blocks from the MTP **draft** head matrix (`lm_head.mtp_draft_q4`) while keeping the full 248,320-token base model `lm_head` untouched.
+
+> [!NOTE]
+> The legacy `--mtp-vocab` integer flag has been removed. Passing `mtp-vocab` in a config file or CLI flag fails immediately at startup with a migration hint to use `--mtp-vocab-filter`.
+
+### Default Behavior (`all`)
+The built-in default is:
 ```ini
 mtp-vocab-filter = all
 ```
-This retains all 248,320 vocabulary tokens in the draft head matrix (357.6 MB in Q4), providing out-of-the-box multilingual support across all scripts, Asian languages, mathematical symbols, and code.
+This retains all 248,320 vocabulary rows (~357.6 MB in Q4), guaranteeing out-of-the-box support for every language. Because scanning the full 248k vocabulary on every draft step adds unnecessary LPDDR5X traffic, the server emits a startup **warning** when `all` is active so operators remember to pick their working languages.
 
-For environments focused on English, Russian, and programming workloads, overriding this parameter delivers tangible speedups:
-```ini
-mtp-vocab-filter = en+ru
-```
-- **Mechanism:** Prunes unused non-Latin / non-Cyrillic rows from the draft head matrix, keeping 160,904 tokens (231.7 MB, -35.2% matrix footprint).
-- **Draft Latency:** Reduces draft step latency from 2.11 ms down to **1.57 ms** (-25.6%).
-- **Throughput:** Delivers a sustained **+4.4% to +4.6% decode throughput increase** across all prompts (70.64 -> 73.72 tok/s on Thinking-Cap).
-- **Bit-Identity Guarantee:** Output sequences under greedy decoding (T = 0) are **100.000% bit-identical** (`H_all == H_en_ru`) because the full-precision base verifier checks all candidates against the complete base vocabulary.
+### Language Blocks & Syntax (`+`-separated)
+Whenever filtering is enabled (`!= all`), `core` + `en` are **mandatory** and cannot be omitted — Qwen 3.8 performs internal `<think>` reasoning in English, and stripping `core` special tokens (`<think>`, `</think>`, `<tool_call>`, `<|im_end|>`) or raw byte-fallback tokens breaks speculative drafting. Trying to run without `en` (e.g. `ru` or `eu` alone) fails fatally at startup.
+
+Combine blocks with `+`:
+
+| Block Tag (Aliases) | Included Vocabulary Content | Qwen 3.8 Rows | Q4 Footprint | Example Config |
+| :--- | :--- | :---: | :---: | :--- |
+| `all` | Full unfiltered vocabulary (emits startup warning) | 248,320 | ~357.6 MB | `mtp-vocab-filter = all` |
+| `en` | **Mandatory base:** `core` (special tokens, 256 bytes, whitespace, digits, code/math symbols, single Greek math letters) + English/code ASCII-Latin (Epoch 1) | 93,294 | ~134.3 MB | `mtp-vocab-filter = en` |
+| `+eu` | European Latin: multilingual ASCII-Latin words (auto-detected post-Han Epoch 3, `eu_ascii_start=151580`) + European Latin-1 / Latin-Ext diacritics (`de`, `fr`, `es`, `it`, `pt`, `pl`, `cs`, `hr`, `tr`, `nordic`, ...) | +47,272 | +68.1 MB | `mtp-vocab-filter = en+eu` (140,566 rows, 202.4 MB) |
+| `+ru` (`cyrillic`) | Entire Cyrillic Unicode block (Russian, Ukrainian, Belarusian, Bulgarian, Serbian, etc.) + Cyrillic partial UTF-8 BPE fragments | +18,582 | +26.8 MB | `mtp-vocab-filter = en+ru` (111,876 rows, 161.1 MB) |
+| `+zh` (`cn`) | Han / CJK ideographs + CJK punctuation/fullwidth + Han UTF-8 fragments | +53,978 | +77.7 MB | `mtp-vocab-filter = en+zh` (147,272 rows, 212.1 MB) |
+| `+ja` (`jp`) | Hiragana + Katakana + CJK punctuation/fullwidth (automatically includes `zh` Kanji) | +59,457 | +85.6 MB | `mtp-vocab-filter = en+ja` (152,751 rows, 220.0 MB) |
+| `+ko` (`kr`) | Hangul Syllables/Jamo + CJK punctuation/fullwidth + Hangul UTF-8 fragments | +7,277 | +10.5 MB | `mtp-vocab-filter = en+ko` (100,571 rows, 144.8 MB) |
+| `+ar` (`fa`) | Arabic & Persian (`U+0600..0x06FF`, `U+FE70..0xFEFE`, excluding `U+FEFF` BOM) + Arabic UTF-8 fragments | +8,821 | +12.7 MB | `mtp-vocab-filter = en+ar` (102,115 rows, 147.0 MB) |
+| `+other` | Vietnamese (`U+1EA0..0x1EF9`, `đ/ơ/ư`), Thai, Indic scripts, Greek words, Hebrew, rare scripts & Emoji | +13,524 | +19.5 MB | `mtp-vocab-filter = en+other` (106,818 rows, 153.8 MB) |
+
+Common multi-language combinations:
+- **English + Code + Russian:** `mtp-vocab-filter = en+ru` (`111,876` rows, `161.1 MB` Q4)
+- **English + Code + European + Russian:** `mtp-vocab-filter = en+eu+ru` (`159,148` rows, `229.2 MB` Q4)
+- **English + Code + Japanese (Kana + Kanji):** `mtp-vocab-filter = en+ja` (`152,751` rows, `220.0 MB` Q4)
+
+### Measured Speedup & Determinism (`en+ru` Lossless, Strix Halo `gfx1151`)
+Switching from the legacy `en+ru` filter (160,904 rows / 231.7 MB, which included Epoch-3 European Latin) to the separated lossless `en+ru` filter (`111,876` rows / `161.1 MB`, **−30.5%** draft-head footprint):
+- **Draft Step Calibration Latency:** drops from **1.58 ms → 1.28 ms** (−19.0%).
+- **Greedy Decoding (`T = 0.0`, Solo P1–P6, n=5):** **71.12 → 72.69 tok/s** (+2.2%; P2 hits **90.29 tok/s**) with **100.000% SHA-256 bit-identity** (`d4e53aafaf10e70f`, `9f51ac8d73f49616`, `d2e35593c5e11eb1`, `3754e442b5144c4e`, `59a66b4cf7b69c29`, `ffc67dbf037d2790`), because the full-precision base verifier always evaluates against the complete 248,320-token vocabulary.
+- **Sampling Performance (`T = 0.6` / `T = 1.0`, `--prompt-cache off`):**
+  - `T = 0.6` Solo (`P1/P2/P4/P6`): **75.14 → 76.79 tok/s**
+  - `T = 0.6` 4-Slot Concurrent: **114.95 → 116.96 ± 2.48 tok/s** (`per_slot 33.78 tok/s`)
+  - `T = 1.0` Solo (`P1/P4/P6`): **70.03 → 73.09 tok/s**
+  - `T = 1.0` 33k `<think>`: **57.94 → 61.25 tok/s** (`+5.7%`, acceptance **69.32%**)
+- **Automatic Calibration Isolation:** `mtp_calib_cache.json` fingerprints automatically hash the retained compact token ID list (`canonical#rows#hash64`) without invalidating `.pcache` KV snapshots.

@@ -263,6 +263,8 @@ add_executable(test_online_mtp_lut tools/test_online_mtp_lut.cpp)
 target_link_libraries(test_online_mtp_lut PRIVATE strix_serve)
 add_executable(test_leviathan_sampler tools/test_leviathan_sampler.cpp)
 target_link_libraries(test_leviathan_sampler PRIVATE strix_serve)
+add_executable(test_vocab_filter tools/test_vocab_filter.cpp)
+target_link_libraries(test_vocab_filter PRIVATE strix_serve)
 
 add_executable(fastasfuck_server tools/fastasfuck_server.cpp)
 target_link_libraries(fastasfuck_server PRIVATE strix_serve_model)

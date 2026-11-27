@@ -115,6 +115,9 @@ void ServerSettings::load_file(const std::string &path) {
         STRIX_CHECK(eq != std::string::npos, where, ": '", s, "' has no '='; expected key = value");
         const std::string key = trim(s.substr(0, eq)), value = trim(s.substr(eq + 1));
         STRIX_CHECK(!key.empty(), where, ": no key before '='; expected key = value");
+        STRIX_CHECK(key != "mtp-vocab", where,
+                    ": option 'mtp-vocab' has been removed; use 'mtp-vocab-filter' instead "
+                    "(e.g. 'en', 'en+ru', 'en+eu', 'en+ja', or 'all'). See docs/CONFIGURATION.md");
         size_t i = 0;
         while (i < options_.size() && options_[i].name != key) ++i;
         STRIX_CHECK(i < options_.size(), where, ": unknown key '", key, "'",
@@ -161,6 +164,9 @@ void ServerSettings::load(const std::vector<std::string> &args) {
             config_path_ = v;
             continue;
         }
+        STRIX_CHECK(name != "mtp-vocab",
+                    "command line: option '--mtp-vocab' has been removed; use '--mtp-vocab-filter' instead "
+                    "(e.g. 'en', 'en+ru', 'en+eu', 'en+ja', or 'all'). See docs/CONFIGURATION.md");
         size_t i = 0;
         while (i < options_.size() && options_[i].name != name) ++i;
         STRIX_CHECK(i < options_.size(), "command line: unknown option '", k, "'; see strix_server --help");
@@ -354,10 +360,9 @@ std::vector<ConfigOption> strix_server_options(const std::string &models_dir) {
         {"mtp-bias", K::Number, -100.0, 100.0, "0.0", "MTP cost-gating sigmoid bias shift"},
         {"mtp-lut-step-penalty", K::Number, 0.0, 1.0, "0.015", "MTP cost-gating LUT step penalty deduction"},
         {"mtp-ema-decay", K::Number, 0.01, 1.0, "0.15", "MTP cost-gating Renewal-Reward EMA smoothing factor"},
-        {"mtp-vocab", K::Int, 0, 1 << 30, "0", "MTP: drafts are scored over token ids [0, N); 0 = the whole vocabulary"},
         {"mtp-vocab-filter", K::Text, 0, 0, "all",
-         "MTP draft vocabulary filter preset (all, en+ru, en, no-cjk) or comma-separated sections "
-         "(core,latin,cyrillic,greek,digits,punct,code,cjk,arabic,asian,other)"},
+         "MTP draft vocabulary filter: 'all' (full vocab, slower drafting), 'en' (mandatory core + English/code), "
+         "or '+'-separated blocks with 'en' (eu, ru/cyrillic, zh/cn, ja/jp, ko/kr, ar/fa, other; e.g. en+ru, en+eu, en+ja)"},
         {"draft-head-q4", K::OnOff, 0, 0, "on",
          "MTP draft head: quantize a Q4 copy of the draft vocabulary's LM head rows at load for faster drafting; "
          "off uses the loaded Q8 LM head directly"},
