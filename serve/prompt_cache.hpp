@@ -393,10 +393,8 @@ private:
         uint64_t last_used = 0;
         int64_t saved_by = 0;
     };
-    // Drops the least recently used point (its bytes off ram_bytes_; the buffer is unmapped when its last holder
-    // lets go - here, under the lock (~0.11 GB, a millisecond or two), unless a with_point call still reads it).
-    // False if there is none.
-    bool drop_point_locked();
+    // Drops the least recently used point and returns its freed RAM bytes (0 if there is none).
+    uint64_t drop_point_locked();
     struct Job {
         EntryPtr e;
         Why why;
@@ -424,6 +422,8 @@ private:
     void release_locked(Entry &e);                     // a reader / the writer is done with e
     void unlink_locked(Entry &e);                      // its file
     void keep_spare_locked(HostBuffer b);
+    uint64_t spare_cap_locked() const;
+    void trim_spares_locked(size_t max_count, uint64_t max_bytes);
     // The RAM rule: MemAvailable >= ram_margin + extra. avail: the caller's reading of MemAvailable (UINT64_MAX: read it
     // here) - make_room_for passes the one its check used, so both decide on the same number.
     void make_room_locked(uint64_t extra = 0, uint64_t avail = UINT64_MAX);
@@ -438,7 +438,8 @@ private:
     void evict_disk_locked(uint64_t need);
     // Makes room for `need` bytes on disk by evicting entries used less recently than `last_used`; false if it can't.
     bool disk_room_locked(uint64_t need, uint64_t last_used);
-    bool spend_budget_locked(uint64_t bytes);
+    bool spend_budget_locked(uint64_t bytes, uint64_t reserve = 0);
+    uint64_t idle_write_reserve_locked() const;  // portion of write budget held in reserve for urgent RAM evictions
     double budget_now_locked() const;  // write budget bytes left now (refilled since budget_at_); no spending
     // The writer's state line, every kSummarySeconds while something changed (puts, hits, writes, drops).
     void summary_locked(double now);
