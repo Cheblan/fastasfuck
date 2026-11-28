@@ -51,12 +51,12 @@ All kernel implementations, memory layouts, and scheduling algorithms must be ta
 ### 3.3 Recommended Linux Kernel Command Line
 To prevent ROCm SVM page-fault stalls, eliminate direct page reclaim thrashing, and ensure safe kernel headroom:
 ```bash
-ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=always
+ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=madvise
 ```
 *Rationale:*
 - `amdgpu.gttsize=122880` (120 GiB) and `ttm.pages_limit=31457280` (31,457,280 pages × 4 KiB = 120 GiB) provide the GPU with full allocation headroom while strictly reserving an 8 GiB safety margin for the Linux kernel, slab caches, and OS networking buffers (avoiding catastrophic direct memory reclaim storms).
 - `amd_iommu=off` eliminates translation overhead and IOMMU page table walking for unified memory dispatches.
-- `transparent_hugepage=always` enforces 2 MiB page compaction, dramatically reducing TLB miss penalties on massive contiguous allocations.
+- `transparent_hugepage=madvise` grants 2 MiB pages only to processes that explicitly request them via `madvise(MADV_HUGEPAGE)`, keeping khugepaged background compaction out of all other memory. Under heavy multi-agent concurrency, `always` causes memory bus stalls and ROCm SVM page faults: the engine preflight warns about it, and large engine buffers are deliberately mapped `MADV_NOHUGEPAGE`.
 
 ### 3.4 Target Model Baseline
 - **Primary Model:** Qwen 3.8-Flash-Next.

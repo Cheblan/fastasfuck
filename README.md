@@ -27,7 +27,7 @@ Designed for heavy concurrent coding workloads (OpenCode 2, Codex CLI, Cursor) w
 
 ## Production Verification & Performance
 
-All benchmarks were executed on bare metal running Arch Linux (Kernel 7.3-zen) with recommended kernel headroom (`ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=always`) using **ThinkingCap** weights (`Thinking-Cap-Qwen-3.8-FN`) under the [Recommended Hybrid Q6 Quantization Layout](docs/WEIGHTS.md).
+All benchmarks were executed on bare metal running Arch Linux (Kernel 7.3-zen) with recommended kernel headroom (`ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=madvise`) using **ThinkingCap** weights (`Thinking-Cap-Qwen-3.8-FN`) under the [Recommended Hybrid Q6 Quantization Layout](docs/WEIGHTS.md).
 
 Full methodology, per-prompt latency distributions, and reproducibility scripts: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
@@ -155,7 +155,7 @@ You need an AMD Strix Halo machine with 128 GB of memory running Arch Linux (or 
 To prevent ROCm page-fault stalls and ensure safe allocation headroom, add the following parameters to your bootloader (e.g. in `/etc/default/grub` or systemd-boot loader entry) and reboot:
 
 ```bash
-ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=always
+ttm.pages_limit=31457280 amdgpu.gttsize=122880 amd_iommu=off transparent_hugepage=madvise
 ```
 
 ### 2. Install Native Arch ROCm Packages & Build
@@ -174,7 +174,7 @@ Download pre-quantized weights, n-gram table, and tokenizer from the [Hugging Fa
 
 ```sh
 # Example: ThinkingCap (recommended production default)
-huggingface-cli download Cheblan/ThinkingCap-Qwen3.8-Flash-Next-faf --local-dir /models/Thinking-Cap-Qwen-3.8-FN-faf
+hf download Cheblan/ThinkingCap-Qwen3.8-Flash-Next-faf --local-dir /models/Thinking-Cap-Qwen-3.8-FN-faf --max-workers 16
 ```
 
 ### 4. Run the Server
